@@ -1,11 +1,11 @@
 ---
 name: followup-genie
 description: 项目跟进精灵 —— 流程节点催办。按业务台账判断哪些项目卡住了、卡了多久，生成待催清单，并可推送到企业微信或写入 macOS 提醒事项。当用户问「今天有什么要催的」「某条业务线卡在哪」「哪些项目沉了」，要查看或调整催办规则、接入新的腾讯文档项目台账、配置 Hermes 或 WorkBuddy 自动运行时使用。台账一律只读。
-version: 0.2.0-rc1
-compatibility: 预发布版。Hermes + macOS 已完成实测；WorkBuddy 仅完成标准 Skill 打包，需在 macOS 客户端实机验证。Python 3.9+（macOS 自带的 3.9 即可，无需另装），零第三方 Python 依赖；需要腾讯文档开放平台凭证。Windows 尚未验证。
 ---
 
 # 项目跟进精灵 🧚
+
+版本：`0.2.0-rc2`。这是预发布版；Hermes + macOS 已实测，WorkBuddy 的工作空间安装已完成隔离测试，仍需业务电脑实测。要求 Python 3.9+，零第三方 Python 依赖；需要腾讯文档开放平台凭证。Windows 尚未验证。
 
 给业务本人的**私人待办提醒器**：读业务维护的项目台账，找出在某个流程节点上卡太久的项目，提醒她去催。
 
@@ -13,7 +13,7 @@ compatibility: 预发布版。Hermes + macOS 已完成实测；WorkBuddy 仅完�
 
 ## 铁律：台账只读
 
-**任何情况下都不允许写入、修改、新建、删除台账。** 唯一的持久化写入目标是 `<hermes>/followup/state/` 下的本地文件。
+**任何情况下都不允许写入、修改、新建、删除台账。** 唯一的持久化写入目标是 `<运行时目录>/followup/state/` 下的本地文件。
 
 台账是业务的生产数据、多人协作维护。程序一旦误写，业务无法分辨是人改的还是程序改的，信任一次就没了。**这条优先于任何功能需求**——若某功能只能靠回写台账实现，砍功能，不破例。
 
@@ -23,32 +23,35 @@ compatibility: 预发布版。Hermes + macOS 已完成实测；WorkBuddy 仅完�
 
 ## 怎么用
 
-第一次安装或接新台账时，先读：
+第一次安装时：
 
-- 完整阅读根目录 `README.md`，按其中的 WorkBuddy 首次接入流程执行。
+- 完整阅读根目录 `README.md`，按其中唯一的业务指令执行。
 - 不要求零基础业务阅读其他文件，也不要让业务运行命令或编辑配置。
+- 判断当前宿主后，运行 `python3 scripts/bootstrap.py --host workbuddy|hermes`。
+
+后续调用统一设置 `FOLLOWUP_HOME`：WorkBuddy 使用 `<当前工作空间>/runtime`；Hermes 使用其运行目录。不要让 WorkBuddy 回退读取 `~/.hermes`。
 
 ```bash
 # 今天有什么要催的
-python3 scripts/check_followup.py
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py
 
 # 自检（凭证、台账可读、字段匹配、只读性、权限）
-python3 scripts/doctor.py
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/doctor.py
 
 # 只查配置，不联网
-python3 scripts/doctor.py --validate-config
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/doctor.py --validate-config
 
 # 试跑，不写任何状态文件
-python3 scripts/check_followup.py --dry-run
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --dry-run
 
 # 复现某一天的结果（回归测试用，不影响台账）
-python3 scripts/check_followup.py --today 2026-08-06 --dry-run
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --today 2026-08-06 --dry-run
 
 # 给程序用的结构化输出
-python3 scripts/check_followup.py --json
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --json
 
 # 顺带做只读性验证（运行前后核对台账最后修改时间）
-python3 scripts/check_followup.py --verify-readonly
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --verify-readonly
 ```
 
 在 Hermes 中可注册 cron，以 `--no-agent` 运行纯规则脚本，零 LLM、零 token。
@@ -59,8 +62,8 @@ python3 scripts/check_followup.py --verify-readonly
 
 - **「今天有什么要催的」** → 跑 `check_followup.py`，把输出整理给用户。**不要自己重新判断哪些该催**——判定是确定性的，你的角色是转述和解释，不是复算。
 - **「为什么 XX 项目没被催」** → 跑 `--json` 看它的去向：可能在范围外、已终止、暂缓、未超期、或超期但未到复提醒间隔。**每一类都有明确记录，答案不需要猜。**
-- **「这个数字怎么算出来的」** → 停滞天数 = 当天 − 计时起点。起点来源在 `--json` 的 `clock_source` 字段里，会写明是「某个日期列」还是「快照累积的节点进入时间」。
-- **「改一下阈值/加一个节点」** → 改 `<hermes>/followup/config/rules.json`，不要改代码。改完跑 `doctor.py --validate-config`。
+- **「这个数字怎么算出来的」** → 停滞天数 = 当天 − 计时起点；业务看到的超期天数 = 停滞天数 − 节点允许天数。起点来源在 `--json` 的 `clock_source` 字段里。
+- **「改一下阈值/加一个节点」** → 改 `<运行时目录>/followup/config/rules.json`，不要改代码。改完跑 `doctor.py --validate-config`。
 - **数字必须可复核。** 每条催办都要能让业务在台账里对上：这个项目确实卡在这个节点、确实超了这么多天。对不上就是 bug，不要圆过去。
 
 ## 三件容易误解的事
@@ -94,11 +97,11 @@ python3 scripts/check_followup.py --verify-readonly
 
 ## 目录约定（升级安全）
 
-| 位置 | 内容 | `hermes skills update` 时 |
+| 位置 | 内容 | 升级 Skill 时 |
 |---|---|---|
-| `<hermes>/skills/work/followup-genie/` | 代码、SKILL.md、配置模板 | **会被覆盖** |
-| `<hermes>/followup/config/` | 业务的实际配置 | **不动** |
-| `<hermes>/followup/state/` | 快照、节点进入时间、催办状态 | **不动** |
-| `<hermes>/.env` | 凭证 | **不动，且绝不进包** |
+| `<程序目录>/` | 代码、SKILL.md、配置模板 | **可以被新版本覆盖** |
+| `<运行时目录>/followup/config/` | 业务的实际配置 | **不动** |
+| `<运行时目录>/followup/state/` | 快照、节点进入时间、催办状态 | **不动** |
+| `<运行时目录>/.env` | 凭证 | **不动，且绝不进包** |
 
 **永远不要把配置或状态放进 skill 目录**。一次升级就会冲掉业务的配置和累积的节点进入时间——后者丢了要退回近似值重新初始化，几个月的真实阶段耗时数据一次归零。

@@ -295,7 +295,7 @@ def check_wecom(doc: Doc, output_cfg: dict) -> None:
     url = wecom_push._webhook_url()
     if not url:
         doc.add(BAD, "企微推送已启用，但找不到 webhook 地址",
-                "请在 <hermes>/.env 里配 FOLLOWUP_WECOM_WEBHOOK。\n"
+                "请在 <运行时目录>/.env 里配 FOLLOWUP_WECOM_WEBHOOK。\n"
                 "🔴 当前状态下业务收不到任何消息，而且不会有人发现")
         return
     if "qyapi.weixin.qq.com" not in url:
@@ -324,7 +324,7 @@ def check_alert(doc: Doc, output_cfg: dict) -> None:
     target = core.read_env("FOLLOWUP_ALERT_TARGET")
     if not target:
         doc.add(WARN, "故障告警：已启用但没有目标",
-                "请在 <hermes>/.env 配 FOLLOWUP_ALERT_TARGET（形如 telegram:<chat_id>）。\n"
+                "请在 <运行时目录>/.env 配 FOLLOWUP_ALERT_TARGET（形如 telegram:<chat_id>）。\n"
                 "当前状态下告警降级为只写 health.json + stderr。")
         return
     import check_followup

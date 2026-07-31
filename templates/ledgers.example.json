@@ -1,5 +1,5 @@
 {
-  "_这是模板": "复制到 <hermes>/followup/config/ledgers.json 后按你的台账改。包内模板会被 hermes skills update 覆盖，config/ 下的不会。",
+  "_这是模板": "复制到 <运行时目录>/followup/config/ledgers.json 后按你的台账改。包内模板升级时可能被覆盖，运行时 config/ 下的不会。",
   "_铁律": "所有台账源只读。本文件只提供地址与字段名，不提供任何动作。",
 
   "ledgers": [

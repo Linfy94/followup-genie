@@ -37,44 +37,48 @@ else
   exit 2
 fi
 
-CONF="$HOME_DIR/followup/config"
-STATE="$HOME_DIR/followup/state"
-ENVF="$HOME_DIR/.env"
+CONF="${HOME_DIR}/followup/config"
+STATE="${HOME_DIR}/followup/state"
+ENVF="${HOME_DIR}/.env"
 
 echo "🧚 项目跟进精灵 · 通用引导"
-echo "   代码目录：  $SKILL_DIR"
-echo "   运行时目录：$HOME_DIR（来自 $HOW）"
+echo "   代码目录：  ${SKILL_DIR}"
+echo "   运行时目录：${HOME_DIR}（来自 ${HOW}）"
 echo
 
 # ── 1. 目录 ──
-mkdir -p "$CONF" "$STATE"
+mkdir -p "${CONF}" "${STATE}"
 echo "✅ 目录就绪：followup/config、followup/state"
 
 # ── 2. 配置模板：存在则跳过 ──
 # 🔴 绝不覆盖。升级时这一步会再跑一遍，覆盖等于把业务的规则和口径抹掉。
 copied=0; skipped=0
-for tpl in "$SKILL_DIR"/templates/*.example.json; do
-  [ -e "$tpl" ] || continue
-  base="$(basename "$tpl" .example.json).json"
-  dest="$CONF/$base"
-  if [ -e "$dest" ]; then
-    echo "   ⏭  $base 已存在，跳过（不覆盖你的配置）"
+for tpl in "${SKILL_DIR}"/templates/*.example.json; do
+  [ -e "${tpl}" ] || continue
+  base="$(basename "${tpl}" .example.json).json"
+  dest="${CONF}/${base}"
+  if [ -e "${dest}" ]; then
+    echo "   ⏭  ${base} 已存在，跳过（不覆盖你的配置）"
     skipped=$((skipped + 1))
   else
-    cp "$tpl" "$dest"
-    echo "   📄 $base 已从模板创建 —— 需要按你的台账修改"
+    cp "${tpl}" "${dest}"
+    echo "   📄 ${base} 已从模板创建 —— 需要按你的台账修改"
     copied=$((copied + 1))
   fi
 done
-echo "✅ 配置模板：新建 $copied、跳过 $skipped"
+echo "✅ 配置模板：新建 ${copied}、跳过 ${skipped}"
 
 # ── 3. .env ──
 # 只建空文件，绝不写入任何值。凭证要本人去拿，程序不该代劳、也不该猜。
-if [ -e "$ENVF" ]; then
-  echo "✅ .env 已存在，未改动"
+if [ -L "${ENVF}" ] || { [ -e "${ENVF}" ] && [ ! -f "${ENVF}" ]; }; then
+  echo "❌ ${ENVF} 必须是运行时目录内的普通文件，不能是目录或符号链接。" >&2
+  exit 2
+elif [ -e "${ENVF}" ]; then
+  chmod 600 "${ENVF}"
+  echo "✅ .env 已存在，内容未改动，权限已确认是 600"
 else
   umask 077
-  cat > "$ENVF" <<'ENVEOF'
+  cat > "${ENVF}" <<'ENVEOF'
 # 项目跟进精灵 · 凭证
 # 🔴 这个文件绝不能进 Git、绝不能贴进聊天窗口或工单。
 #    .gitignore 已排除它，但那只防住 git，防不住复制粘贴。
@@ -92,28 +96,28 @@ FOLLOWUP_WECOM_WEBHOOK=
 # 形如 telegram:<chat_id>；需要宿主具备发送能力
 FOLLOWUP_ALERT_TARGET=
 ENVEOF
-  chmod 600 "$ENVF"
-  echo "✅ 已创建 $ENVF（权限 600，内容为空待填）"
+  chmod 600 "${ENVF}"
+  echo "✅ 已创建 ${ENVF}（权限 600，内容为空待填）"
 fi
 
 # ── 4. 不联网自检 ──
 echo
 echo "── 配置自检（不联网）──"
 set +e
-FOLLOWUP_HOME="$HOME_DIR" python3 "$SKILL_DIR/scripts/doctor.py" --validate-config
+FOLLOWUP_HOME="${HOME_DIR}" python3 "${SKILL_DIR}/scripts/doctor.py" --validate-config
 rc=$?
 set -e
 
 cat <<EOF
 
 ── 接下来 ──
-1) 按你的台账改配置：$CONF/ledgers.json 与 rules.json
+1) 按你的台账改配置：${CONF}/ledgers.json 与 rules.json
    （怎么改见 docs/接一条新业务线.md）
-2) 填凭证：$ENVF
+2) 填凭证：${ENVF}
 3) 再自检一次（这次会联网只读台账）：
-     FOLLOWUP_HOME="$HOME_DIR" python3 $SKILL_DIR/scripts/doctor.py
+     FOLLOWUP_HOME="${HOME_DIR}" python3 "${SKILL_DIR}/scripts/doctor.py"
 4) 试跑（不发不写）：
-     FOLLOWUP_HOME="$HOME_DIR" python3 $SKILL_DIR/scripts/check_followup.py --dry-run
+     FOLLOWUP_HOME="${HOME_DIR}" python3 "${SKILL_DIR}/scripts/check_followup.py" --dry-run
 5) 定时运行交给你的宿主：Hermes 见 scripts/install.sh，
    WorkBuddy 见 docs/WorkBuddy安装测试.md，其他见 README 的「按宿主安装」。
 EOF

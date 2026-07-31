@@ -1,7 +1,16 @@
 # 打包改动留痕
 
-版本：`0.2.0-rc1`  
-源码基线：`ea2429b`
+版本：`0.2.0-rc2`
+修复基线：`e32dcca`
+
+## <mark>0.2.0-rc2 新增与修复</mark>
+
+- <mark>修复 UTF-8 环境下通用安装脚本解析中文标点时崩溃的问题。</mark>
+- <mark>Hermes 安装不再吞掉 setup 错误；失败时不会继续生成启动器。</mark>
+- <mark>新增 WorkBuddy / Hermes 统一引导程序及隔离安装测试。</mark>
+- <mark>README 顶部新增业务唯一指令，其他文档不再复制竞争提示词。</mark>
+- <mark>新增零依赖发布构建及 SHA-256 校验。</mark>
+- <mark>Skill frontmatter 只保留标准字段，通用运行目录统一为 FOLLOWUP_HOME。</mark>
 
 本轮只在发布副本中做打包与业务引导，未修改正在运行的 Hermes 工程。
 

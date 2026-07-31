@@ -17,20 +17,20 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # 运行时解析 Hermes 目录，不硬编码
 if [ -n "${HERMES_HOME:-}" ]; then
-  HH="$HERMES_HOME"
-elif [ -d "$HOME/.hermes" ]; then
-  HH="$HOME/.hermes"
+  HH="${HERMES_HOME}"
+elif [ -d "${HOME}/.hermes" ]; then
+  HH="${HOME}/.hermes"
 else
   echo "❌ 找不到 Hermes 配置目录。请先安装 Hermes，或设置 HERMES_HOME。" >&2
   echo "   不用 Hermes 的话，直接跑通用引导：" >&2
-  echo "     FOLLOWUP_HOME=<目录> bash $SKILL_DIR/scripts/setup.sh" >&2
+  echo "     FOLLOWUP_HOME=<目录> bash \"${SKILL_DIR}/scripts/setup.sh\"" >&2
   exit 1
 fi
 
-FU="$HH/followup"
+FU="${HH}/followup"
 
 # ── 1~2. 通用引导：目录、配置模板、.env、不联网自检 ──
-HERMES_HOME="$HH" bash "$SKILL_DIR/scripts/setup.sh" || true
+HERMES_HOME="${HH}" bash "${SKILL_DIR}/scripts/setup.sh"
 
 echo
 echo "── Hermes 专属部分 ──"
@@ -39,9 +39,9 @@ echo "── Hermes 专属部分 ──"
 # hermes cron 的 --script 参数只接受 <hermes>/scripts/ 下的路径，而真实代码在
 # skill 包里（这样才能随 hermes skills update 升级）。shim 是个几行的瘦启动器。
 # 不用软链接：skill 卸载或改名会留下断链，报错难懂。
-mkdir -p "$HH/scripts"
-SHIM="$HH/scripts/followup_genie.py"
-cat > "$SHIM" <<'PYEOF'
+mkdir -p "${HH}/scripts"
+SHIM="${HH}/scripts/followup_genie.py"
+cat > "${SHIM}" <<'PYEOF'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -83,21 +83,21 @@ sys.path.insert(0, str(target))
 sys.argv[0] = str(target / "check_followup.py")
 runpy.run_path(str(target / "check_followup.py"), run_name="__main__")
 PYEOF
-chmod +x "$SHIM"
-echo "✅ cron 启动器已写入：$SHIM"
+chmod +x "${SHIM}"
+echo "✅ cron 启动器已写入：${SHIM}"
 
 cat <<EOF
 
 ── 接下来（Hermes）──
-1) 若配置是新建的：按你的台账改 $FU/config/ledgers.json 和 rules.json
+1) 若配置是新建的：按你的台账改 ${FU}/config/ledgers.json 和 rules.json
 2) 腾讯文档授权：docs.qq.com →「更多操作 → 开放平台」→「OpenClaw 专用入口」
-   扫码后把 token 写入 $HH/.env 的 TENCENT_DOCS_TOKEN=
+   扫码后把 token 写入 ${HH}/.env 的 TENCENT_DOCS_TOKEN=
    （这一步必须业务本人操作）
-3) 试跑： python3 $SKILL_DIR/scripts/check_followup.py --dry-run
+3) 试跑： FOLLOWUP_HOME="${HH}" python3 "${SKILL_DIR}/scripts/check_followup.py" --dry-run
 4) 注册定时任务（确认试跑结果无误后再做）：
    hermes cron create "0 9 * * *" --name "项目跟进精灵" \\
      --script followup_genie.py --no-agent
-5) 要真的写提醒事项时：把 $FU/config/output.json 的 reminders.write 改成 true
+5) 要真的写提醒事项时：把 ${FU}/config/output.json 的 reminders.write 改成 true
    然后跑一次触发 macOS 授权弹窗，点允许。
    ⚠️ 之后必须用 cron 的实际运行路径复验（hermes cron run "项目跟进精灵"）——
       终端里通过不代表 cron 通过，而且失败是静默的。

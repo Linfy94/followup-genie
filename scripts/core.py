@@ -10,7 +10,7 @@
      接新业务线时只加配置文件，不改这里。
   2. 任何"静默"都是 bug。过滤掉多少行、禁用了哪些节点、哪些断言没过，
      全部要出现在报告里。一个悄悄不跑的规则比一个跑错的规则更难发现。
-  3. 唯一的持久化写入是 <hermes>/followup/state/ 下的本地文件。台账只读。
+  3. 唯一的持久化写入是 <运行时目录>/followup/state/ 下的本地文件。台账只读。
 """
 
 from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
@@ -68,7 +68,7 @@ def state_dir() -> Path:
 
 def read_env(key: str) -> str | None:
     """
-    从 <hermes>/.env 读一个键。**绝不打印值。**
+    从 <运行时目录>/.env 读一个键。**绝不打印值。**
 
     qqdoc.load_token() 里有一份近似实现且刻意不合并 —— qqdoc 是最底层的取数模块，
     core 依赖它，它不能反过来依赖 core（循环导入）。十几行的重复换掉循环依赖，值。

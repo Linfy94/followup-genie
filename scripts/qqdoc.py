@@ -76,7 +76,7 @@ def _hermes_home() -> Path:
 
 
 def load_token() -> str:
-    """从 <hermes>/.env 读 TENCENT_DOCS_TOKEN。绝不打印 token 本身。"""
+    """从 <运行时目录>/.env 读 TENCENT_DOCS_TOKEN。绝不打印 token 本身。"""
     env_path = _hermes_home() / ".env"
     if not env_path.exists():
         raise LedgerError(f"凭证文件不存在：{env_path}")
@@ -88,7 +88,7 @@ def load_token() -> str:
                 return tok
     raise LedgerError(
         "未找到 TENCENT_DOCS_TOKEN。请到 docs.qq.com →「更多操作 → 开放平台」"
-        "→「OpenClaw 专用入口」扫码获取，写入 <hermes>/.env"
+        "→「OpenClaw 专用入口」扫码获取，写入 <运行时目录>/.env"
     )
 
 

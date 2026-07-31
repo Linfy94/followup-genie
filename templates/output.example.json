@@ -34,6 +34,6 @@
 
   "wecom_webhook": {
     "enabled": false,
-    "_enabled说明": "Windows 兜底通道，本期不做。启用时 webhook URL 属凭证，放 <hermes>/.env 的 FOLLOWUP_WECOM_WEBHOOK，不要写在这里。"
+    "_enabled说明": "Windows 兜底通道，本期不做。启用时 webhook URL 属凭证，放 <运行时目录>/.env 的 FOLLOWUP_WECOM_WEBHOOK，不要写在这里。"
   }
 }

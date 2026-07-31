@@ -12,7 +12,7 @@
 设计：纯规则判定，零 LLM 零 token。cron 用 --no-agent 直接投递本脚本的 stdout。
       清单为空则完全静默（无事不发是降噪的一部分）。
 
-铁律：台账只读。唯一的持久化写入是 <hermes>/followup/state/ 下的本地文件。
+铁律：台账只读。唯一的持久化写入是 <运行时目录>/followup/state/ 下的本地文件。
 
 ═══════════════════════════════════════════════════════════════════════
 退出码（Hermes 按它判定任务成败，见 cron/scheduler.py 的 no_agent 分支）：
@@ -83,7 +83,7 @@ def alert(text: str, output_cfg: dict, *, stream=None) -> tuple[bool, str]:
 
     target = core.read_env("FOLLOWUP_ALERT_TARGET")
     if not target:
-        detail = ("未配置 FOLLOWUP_ALERT_TARGET（<hermes>/.env），"
+        detail = ("未配置 FOLLOWUP_ALERT_TARGET（<运行时目录>/.env），"
                   "告警降级为只写 health.json + stderr")
         print(f"🔴 故障告警未发出：{detail}\n   原本要告警的内容：{text[:200]}",
               file=out)

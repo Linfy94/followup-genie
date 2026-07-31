@@ -1,30 +1,18 @@
 # WorkBuddy 代理指令
 
-> 这是**写给 WorkBuddy Agent 的操作指令书**，不是给人读的说明。
-> 业务只需要把下面「给业务的唯一一条指令」那一段发给 WorkBuddy，其余全是 Agent 的活。
->
-> 原本它放在仓库根目录当 README，但打开 GitHub 首页看到一段角色扮演提示词，
-> 对人和对别的 harness 都不友好，所以移到这里。**内容一字未改。**
-> 安装契约、命令总表、退出码见 [README.md](../README.md)。
+> 这是写给 WorkBuddy Agent 的详细参考，不是业务安装入口。
+> **唯一有效的业务指令在根目录 [README.md](../README.md) 顶部。**
+> 不要再向业务提供本文件中的局部步骤作为第二套安装提示词。
 
 ---
 
-> `0.2.0-rc1` 业务内测版。Hermes + macOS 已实测；WorkBuddy 仍需业务电脑验证。
+> `0.2.0-rc2` 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍需业务电脑验证。
 
-这是给 WorkBuddy Agent 执行的唯一操作说明。业务不需要懂 Git、代码或命令行，也不需要阅读
-仓库中的其他文档。
+业务不需要懂 Git、代码或命令行，也不需要阅读本文件。
 
 ## 给业务的唯一一条指令
 
-安装 Skill 后，把下面整段发给 WorkBuddy：
-
-> 请使用“项目跟进精灵”完成首次接入和后续自动运行。先完整阅读这个 Skill 根目录的
-> `README.md` 并严格执行，所有技术操作由你完成；我是零基础业务人员，请一次只问我一个
-> 业务问题，用业务语言解释，不要让我运行命令或修改文件。使用当前工作空间下独立的
-> `runtime` 目录，腾讯文档台账永远只读。先用测试台账和测试群完成配置检查、只读试跑和
-> 对账；在我明确回复“确认通过”前，不得真实发送消息、写提醒事项或启用自动化。
-> 通过后再引导我完成一次测试群发送，并建立工作日每日自动化。遇到任何不确定、权限提示
-> 或错误时立即停止，不猜、不覆盖已有配置，并明确告诉我需要确认什么。
+只使用根目录 README 顶部的完整段落。本文件不再复制该段，避免两份内容以后不一致。
 
 以下内容全部写给 Agent。
 
@@ -61,7 +49,7 @@ runtime/
     └── state/
 ```
 
-后续调用脚本时始终令 `HERMES_HOME` 指向这个 `runtime`。不要运行 `scripts/install.sh`，
+后续调用脚本时始终令 `FOLLOWUP_HOME` 指向这个 `runtime`。不要运行 `scripts/install.sh`，
 它是 Hermes 专用安装器。
 
 ### 2. 初始化配置
@@ -124,7 +112,7 @@ FOLLOWUP_WECOM_WEBHOOK=测试群机器人地址
 从 Skill 根目录运行：
 
 ```bash
-HERMES_HOME="<当前工作空间>/runtime" python3 scripts/doctor.py --validate-config
+FOLLOWUP_HOME="<当前工作空间>/runtime" python3 scripts/doctor.py --validate-config
 ```
 
 有红色错误就停止，用业务语言说明缺什么。不要自动改业务规则。
@@ -132,7 +120,7 @@ HERMES_HOME="<当前工作空间>/runtime" python3 scripts/doctor.py --validate-
 ### 6. 再做只读试跑
 
 ```bash
-HERMES_HOME="<当前工作空间>/runtime" \
+FOLLOWUP_HOME="<当前工作空间>/runtime" \
 python3 scripts/check_followup.py --dry-run --verify-readonly
 ```
 
@@ -203,4 +191,4 @@ python3 scripts/check_followup.py --dry-run --verify-readonly
 ./run_tests.sh
 ```
 
-当前源码基线：`ea2429b`。真实凭证、业务配置、客户数据和状态不得进入仓库。
+当前发布版本：`0.2.0-rc2`。真实凭证、业务配置、客户数据和状态不得进入仓库。

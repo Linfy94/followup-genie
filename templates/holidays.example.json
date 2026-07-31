@@ -1,5 +1,5 @@
 {
-  "_这是模板": "复制到 <hermes>/followup/config/holidays.json 后按当年的放假通知填。",
+  "_这是模板": "复制到 <运行时目录>/followup/config/holidays.json 后按当年的放假通知填。",
 
   "_什么时候需要它": [
     "只有当某个节点的 repeat 用了 {\"workdays\": N}（每 N 个工作日提醒一次）才需要。",

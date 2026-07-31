@@ -1,6 +1,12 @@
 # 项目跟进精灵 🧚
 
-> `0.2.0-rc1` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 已完成标准 Skill 打包，待实机验证。
+> `0.2.0-rc2` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
+
+## 给业务：只复制下面这一段
+
+> 请帮我安装并启用“项目跟进精灵”。请从 `https://github.com/Linfy94/followup-genie/releases/latest/download/followup-genie-agent.zip` 下载安装包，同时下载同目录的 `SHA256SUMS.txt` 并核对文件完整性；校验失败立即停止。解压后完整阅读包内的 `SKILL.md` 和 `README.md`，判断你当前运行在 WorkBuddy 还是 Hermes，然后使用包内 `scripts/bootstrap.py` 完成对应安装。所有技术操作由你完成，不要让我运行命令、编辑文件或理解 Git；使用独立运行目录，腾讯文档台账永远只读，不覆盖已有配置、状态或凭证。安装后只执行离线配置检查，明确告诉我安装路径、版本和检查结果，然后一次只问我一个业务问题，引导我接入测试台账；在我明确回复“确认通过”前，不得读取正式台账、真实发送消息、写提醒事项或创建自动化。遇到下载、权限、校验或安装错误时立即停止，不猜测、不绕过，并用业务语言告诉我需要确认什么。
+
+这段指令会把程序安装到当前工作空间并立即可用，不承诺自动出现在 WorkBuddy 的“已安装技能”列表。若要显示在技能列表，使用同一 Release 中的 `.skill` 文件手动上传。
 
 读业务维护的项目台账，找出**在某个流程节点上卡太久**的项目，生成待催清单推给业务本人。
 
@@ -118,17 +124,21 @@ FOLLOWUP_ALERT_TARGET=       # 可选。故障告警发到哪，形如 telegram:
 ### Hermes
 
 ```bash
-bash scripts/install.sh     # 先调 setup.sh，再写 cron shim
+python3 scripts/bootstrap.py --host hermes
 hermes cron create "0 9 * * 1-5" --name "项目跟进精灵" \
   --script followup_genie.py --no-agent
 ```
 
+统一引导会把代码安装到 Hermes Skill 目录，再调用 `install.sh` 建配置与 cron 启动器。
 `--no-agent` 表示纯脚本、不走 LLM。Hermes 按**退出码**判定任务成败（见下表），失败会投递告警。
 
 ### WorkBuddy
 
-见 [docs/WorkBuddy安装测试.md](docs/WorkBuddy安装测试.md)（导入与实测步骤）
-与 [docs/WorkBuddy代理指令.md](docs/WorkBuddy代理指令.md)（发给 Agent 的完整指令书）。
+业务只需把 README 顶部的唯一指令发给当前 Agent。Agent 下载并校验发布包后执行：
+
+```bash
+python3 scripts/bootstrap.py --host workbuddy --workspace "<当前工作空间>"
+```
 
 ⚠️ WorkBuddy 的定时运行会**发起 Agent 任务**，与 Hermes 的 `--no-agent` 不同，会消耗积分，
 也受模型、权限确认和客户端在线状态影响。
@@ -155,15 +165,15 @@ crontab 示例（工作日 9:00）：
 ## 命令与退出码
 
 ```bash
-python3 scripts/check_followup.py                    # 跑一次（会发消息、会写状态）
-python3 scripts/check_followup.py --dry-run          # 试跑：不发不写
-python3 scripts/check_followup.py --json             # 结构化输出，给程序用。不发不写
-python3 scripts/check_followup.py --today 2026-08-07 # 模拟某一天。不发不写
-python3 scripts/check_followup.py --verbose          # 附运行摘要与调试信息
-python3 scripts/check_followup.py --verify-readonly  # 顺带核对台账未被修改
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py                    # 跑一次（会发消息、会写状态）
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --dry-run          # 试跑：不发不写
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --json             # 结构化输出，给程序用。不发不写
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --today 2026-08-07 # 模拟某一天。不发不写
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --verbose          # 附运行摘要与调试信息
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --verify-readonly  # 顺带核对台账未被修改
 
-python3 scripts/doctor.py --validate-config          # 只查配置，不联网
-python3 scripts/doctor.py                            # 全项自检（联网只读台账）
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/doctor.py --validate-config          # 只查配置，不联网
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/doctor.py                            # 全项自检（联网只读台账）
 
 ./run_tests.sh                                       # 全部自动化测试，零网络
 ```
@@ -237,7 +247,7 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 
 ## 已知边界
 
-见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.2.0-rc1` 的主要限制：
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.2.0-rc2` 的主要限制：
 WorkBuddy 未实机验证、Windows 未验证、缺独立看门狗、零催办时本地无回执。
 
 ---

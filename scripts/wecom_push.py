@@ -83,7 +83,7 @@ class PushResult:
 
 def _webhook_url() -> str | None:
     """
-    从 <hermes>/.env 读 webhook 地址。
+    从 <运行时目录>/.env 读 webhook 地址。
 
     这个地址等同于密码——拿到就能往那个群里发消息，所以只放 .env，
     不进配置文件、不进 skill 包、任何情况下不打印。
@@ -279,7 +279,7 @@ def push(text: str, output_cfg: dict, *, allowed: bool, stream=None) -> PushResu
 
     url = _webhook_url()
     if not url:
-        msg = "企微推送已启用，但 <hermes>/.env 里没有 FOLLOWUP_WECOM_WEBHOOK"
+        msg = "企微推送已启用，但 <运行时目录>/.env 里没有 FOLLOWUP_WECOM_WEBHOOK"
         print(f"🔴 {msg}", file=out)
         return PushResult(attempted=True, ok=False, sent=0, total=0, errors=[msg])
 
