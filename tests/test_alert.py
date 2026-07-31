@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+P0-B：故障告警不得静默失败。
+
+企微是唯一的内容通道。它挂了 → 业务完全收不到 → 而「完全静默」和
+「今天没有超时单」长得一模一样。告警是这条链上最后一道让人知情的机制，
+**它自己挂了必须留下痕迹**，绝不能一声不响地返回。
+"""
+
+from __future__ import annotations
+
+import unittest
+from datetime import date
+
+# harness 必须先导入 —— 是它把 scripts/ 放进 sys.path 的
+from harness import (make_sheet, row, days_ago, temp_home, run_main,  # noqa: I001
+                     read_state, output_cfg)
+import check_followup  # noqa: E402
+
+TODAY = date(2026, 7, 20)
+
+
+def overdue_sheet():
+    return make_sheet([
+        row(1, "甲公司", tech="待收资", reported=days_ago(TODAY, 40),
+            progress=days_ago(TODAY, 40)),
+    ])
+
+
+class AlertTest(unittest.TestCase):
+
+    def test_alert_success_is_recorded(self):
+        with temp_home() as home:
+            r = run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         post_results=False, alert_ok=True)
+            self.assertEqual(r.code, 1)
+            self.assertTrue(r.alerted)
+            h = read_state(home, "health.json")
+            self.assertIs(h["alert_ok"], True)
+
+    def test_hermes_send_nonzero_exit_is_not_swallowed(self):
+        """
+        🔴 旧实现的病根：subprocess.run(...) 之后不看 returncode，
+           hermes send 失败也当成功返回。
+        """
+        with temp_home() as home:
+            r = run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         post_results=False, alert_ok=False)
+            self.assertEqual(r.code, 1, "主任务仍按主任务的成败判定")
+            self.assertIn("故障告警发送失败", r.err)
+            h = read_state(home, "health.json")
+            self.assertIs(h["alert_ok"], False)
+            self.assertIn("退出码 3", h["alert_detail"])
+
+    def test_hermes_not_on_path_is_loud(self):
+        """
+        cron 由 launchd 派生的 gateway 启动，PATH 与登录终端不同。
+        本机恰好能找到是偶然，业务那台不保证。
+        """
+        with temp_home() as home:
+            r = run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         post_results=False, hermes_found=False)
+            self.assertEqual(r.code, 1)
+            self.assertIn("找不到 hermes", r.err)
+            self.assertIn("原本要告警的内容", r.err,
+                          "发不出去时至少要把内容打进日志，不能凭空消失")
+            h = read_state(home, "health.json")
+            self.assertIs(h["alert_ok"], False)
+
+    def test_no_alert_target_configured(self):
+        with temp_home(env_lines=[
+            "TENCENT_DOCS_TOKEN=fake",
+            "FOLLOWUP_WECOM_WEBHOOK=https://qyapi.weixin.qq.com/x?key=fake",
+        ]) as home:
+            r = run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         post_results=False)
+            self.assertEqual(r.code, 1)
+            self.assertIn("FOLLOWUP_ALERT_TARGET", r.err)
+            self.assertIs(read_state(home, "health.json")["alert_ok"], False)
+
+    def test_alert_disabled_by_config(self):
+        cfg = output_cfg(alert={"enabled": False})
+        with temp_home(output=cfg):
+            r = run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         post_results=False)
+            self.assertEqual(r.code, 1, "关掉告警不改变主任务的成败")
+            self.assertEqual(r.alerts, [], "关了就不该发")
+
+    def test_alert_failure_does_not_mask_main_success(self):
+        """
+        「告警发出去了」≠「主任务成功」，反过来也一样：
+        主任务成功时不该有告警，退出码必须是 0。
+        """
+        with temp_home():
+            r = run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         post_results=True, alert_ok=False)
+            self.assertEqual(r.code, 0)
+            self.assertEqual(r.alerts, [])
+
+    def test_alert_target_never_printed_in_full(self):
+        """告警目标是个人标识，日志里只该出现平台名。"""
+        with temp_home():
+            r = run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         post_results=False)
+            self.assertNotIn("telegram:000000", r.out + r.err)
+
+
+class HealthRecordTest(unittest.TestCase):
+    """健康记录抓的是别的机制都抓不到的那类失败：**根本没跑**。"""
+
+    def test_success_records_full_success_and_resets_counter(self):
+        with temp_home(state={"health.json": {"consecutive_failures": 5}}) as home:
+            run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                     post_results=True)
+            h = read_state(home, "health.json")
+            self.assertTrue(h["last_full_success"])
+            self.assertTrue(h["last_fetch_ok"])
+            self.assertTrue(h["last_wecom_ok"])
+            self.assertEqual(h["consecutive_failures"], 0)
+
+    def test_failures_accumulate(self):
+        with temp_home() as home:
+            for _ in range(3):
+                run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         post_results=False)
+            h = read_state(home, "health.json")
+            self.assertEqual(h["consecutive_failures"], 3)
+            self.assertEqual(h["last_failure"]["stage"], "企微推送")
+            self.assertIsNone(h.get("last_full_success"))
+
+    def test_fetch_failure_recorded_separately(self):
+        with temp_home() as home:
+            r = run_main([f"--today={TODAY}", "--force-push"], overdue_sheet(),
+                         read_sheet_error="凭证失效或无权限（HTTP 401）")
+            self.assertEqual(r.code, 1)
+            self.assertTrue(r.alerted)
+            h = read_state(home, "health.json")
+            self.assertEqual(h["last_failure"]["stage"], "取数/判定")
+            self.assertIn("401", h["last_failure"]["reason"])
+            self.assertIsNone(h.get("last_fetch_ok"))
+
+    def test_dry_run_does_not_touch_health(self):
+        with temp_home() as home:
+            run_main(["--dry-run"], overdue_sheet())
+            self.assertIsNone(read_state(home, "health.json"))
+
+
+class HermesBinTest(unittest.TestCase):
+    def test_finds_hermes_via_which(self):
+        import shutil
+        from unittest import mock
+        with mock.patch.object(shutil, "which", lambda n: "/usr/local/bin/hermes"):
+            self.assertEqual(check_followup._hermes_bin(), "/usr/local/bin/hermes")
+
+    def test_returns_none_when_absent(self):
+        import shutil
+        from unittest import mock
+        with temp_home():  # HERMES_HOME 指向临时目录，回退路径也不会命中
+            with mock.patch.object(shutil, "which", lambda n: None):
+                self.assertIsNone(check_followup._hermes_bin())
+
+
+if __name__ == "__main__":
+    unittest.main()

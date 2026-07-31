@@ -1,0 +1,19 @@
+# 🔴 凭证。腾讯文档 token、企微 webhook 都在里面。
+.env
+.env.*
+
+# 🔴 真实配置与状态：台账地址、客户名单、催办记录。
+# 只有 templates/ 里的示例进仓库。
+followup/
+runtime/
+state/
+
+# 损坏状态文件的留存副本（可能含客户数据）
+*.corrupt.*
+
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+coverage/
+.coverage

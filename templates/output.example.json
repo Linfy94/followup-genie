@@ -1,0 +1,39 @@
+{
+  "_说明": "输出通道配置。",
+  "_最重要的一条": "reminders.write 默认 false。配置文件缺失或键缺失时也必须按 false 走，绝不默认开启。开关只能人工改，脚本任何情况下不得改写它。",
+
+  "notify": {
+    "primary": "stdout",
+    "_primary说明": [
+      "主通知通道。只有它完整送达，项目才会被记为「已通知」进入静默期；",
+      "telegram 是故障告警通道、提醒事项是私人待办，都不算送达凭证。",
+      "模板里默认 stdout —— 这样刚装完就是一个自洽的演练状态：",
+      "打印到屏幕、不发任何人。真要推企微时，把这里改成 wecom_webhook",
+      "并把下面的 wecom_webhook.enabled 改成 true，两处必须同时改。",
+      "🔴 别省掉这一段靠缺省值：代码的缺省是 wecom_webhook，与模板里",
+      "   enabled=false 冲突，会让全新安装一上来就报「主通道指向企微但企微是关的」。"
+    ]
+  },
+
+  "reminders": {
+    "write": false,
+    "_write说明": "false = 演练模式：只把「本该创建/更新哪些提醒」打印到 stdout，不调用任何 osascript 写入命令。迁到业务电脑后人工改 true。",
+    "list_name": "项目跟进精灵",
+    "_list_name说明": "提醒事项里的列表名。不存在时会在首次写入前提示创建（脚本不自动建）。"
+  },
+
+  "calendar": {
+    "write": false,
+    "_write说明": "日历联动。用途待业务确认（写节点截止日 vs 读日历避开忙碌时段），确认前保持 false。"
+  },
+
+  "stdout": {
+    "enabled": true,
+    "_enabled说明": "把待催清单打印到 stdout。cron --no-agent 模式下这就是投递内容。空清单时静默（无事不发是降噪的一部分）。"
+  },
+
+  "wecom_webhook": {
+    "enabled": false,
+    "_enabled说明": "Windows 兜底通道，本期不做。启用时 webhook URL 属凭证，放 <hermes>/.env 的 FOLLOWUP_WECOM_WEBHOOK，不要写在这里。"
+  }
+}
