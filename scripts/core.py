@@ -18,6 +18,7 @@ from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
 import json
 import os
 import sys
+import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -394,7 +395,8 @@ def now_iso() -> str:
 # ── 运行锁 ────────────────────────────────────────────────────────────
 
 LOCK_FILE = ".run.lock"
-LOCK_STALE_SECONDS = 30 * 60
+LOCK_STALE_SECONDS = 30 * 60        # 超过它才考虑「是不是卡住了」
+LOCK_ABANDON_SECONDS = 6 * 60 * 60  # 进程还活着也当它僵死的绝对上限
 
 
 class LockBusy(Exception):
@@ -413,12 +415,63 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def acquire_lock() -> tuple[Path, str | None]:
-    """
-    取运行锁。返回 (锁路径, 夺锁告警或 None)。
+def _read_lock(p: Path) -> dict:
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 —— 锁文件本身坏了，按无法解析处理
+        return {}
+    return d if isinstance(d, dict) else {}
 
-    拿不到且持锁者还活着 → 抛 LockBusy，调用方安静退出。
-    锁陈旧（进程已死 / 超 30 分钟）→ 夺回并返回一条告警。
+
+def _create_lock_exclusive(p: Path, payload: str) -> bool:
+    """
+    只有在锁不存在时才创建成功。**这是整套并发保护唯一的原子操作。**
+
+    O_CREAT|O_EXCL 由内核保证：多个进程同时调用，有且只有一个拿到文件描述符。
+    """
+    try:
+        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return True
+
+
+def acquire_lock() -> tuple[Path, str, str | None]:
+    """
+    取运行锁。返回 `(锁路径, owner_token, 夺锁告警或 None)`。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 旧实现三处并发缺陷，全在这里修掉：
+
+      ① 夺陈旧锁用的是 `p.write_text()` —— **不是原子操作**。
+         两个进程同时判定「锁已陈旧」，会双双写入、双双以为自己持锁，
+         然后并行跑判定、并行写状态、并行推送。
+         改法：先 unlink 再走一次 O_EXCL 重建 —— unlink 谁成功都无所谓
+         （另一个拿到 ENOENT，无害），但**重建只有一个能赢**。
+
+      ② 锁里没有身份标识，释放时只按路径删。A 的锁被 B 夺走后，
+         A 跑完照样把 B 的锁删掉 —— 于是 C 进来又拿到锁，**并发保护归零**。
+         改法：每次持锁生成一个不可复用的 uuid token，释放前核对。
+
+      ③ 「存活但超 30 分钟」直接夺锁。那个进程还活着，夺了就是两个进程
+         同时写状态 —— 正是锁要防的事。
+         改法见下表：活着就不夺，只告警 + 让路；超 6 小时才当它僵死。
+    ═══════════════════════════════════════════════════════════════════
+
+    持锁判定：
+
+      | 持锁进程 | 已持锁 | 处理 |
+      |---|---|---|
+      | 存活 | < 30 min | 安静跳过（LockBusy，退出码 0，无告警） |
+      | 存活 | 30min–6h | **跳过 + 告警**，不夺活着的锁 |
+      | 存活 | > 6h     | 夺锁 + 告警（几乎肯定僵死） |
+      | 已死 | 任意      | 夺锁 + 告警 |
+      | 锁文件坏 | —     | 夺锁 + 告警 |
+
     **必须能夺回** —— 否则一次卡死会让之后每天都静默跳过，
     而「每天静默跳过」和「每天没有超时单」长得一模一样。
     """
@@ -426,46 +479,107 @@ def acquire_lock() -> tuple[Path, str | None]:
         raise LedgerError("只读模式不该加锁 —— 调用方应先判断 real_run")
     state_dir().mkdir(parents=True, exist_ok=True)
     p = _state_path(LOCK_FILE)
+    token = uuid.uuid4().hex
     payload = json.dumps(
-        {"pid": os.getpid(), "started_at": now_iso()}, ensure_ascii=False
+        {"pid": os.getpid(), "started_at": now_iso(), "token": token},
+        ensure_ascii=False,
     )
-    try:
-        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        os.write(fd, payload.encode("utf-8"))
-        os.close(fd)
-        return p, None
-    except FileExistsError:
-        pass
 
-    holder: dict = {}
-    try:
-        holder = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 —— 锁文件本身坏了，按陈旧处理
-        holder = {}
+    if _create_lock_exclusive(p, payload):
+        return p, token, None
 
+    holder = _read_lock(p)
     pid = holder.get("pid")
     started = parse_dt(holder.get("started_at"))
     alive = _pid_alive(pid) if isinstance(pid, int) else False
     age = (datetime.now().astimezone() - started).total_seconds() if started else None
-    fresh = age is not None and age < LOCK_STALE_SECONDS
 
-    if alive and fresh:
+    if alive and age is not None and age < LOCK_STALE_SECONDS:
         raise LockBusy(
             f"另一次运行正在进行（pid {pid}，started {holder.get('started_at')}）"
         )
 
+    if alive and (age is None or age < LOCK_ABANDON_SECONDS):
+        # 活着但跑太久。**不夺** —— 夺了就是两个进程同时写状态。
+        # 但也不能闷声跳过：真卡死的话每天都会跳，而那和「每天没事」一样安静。
+        mins = int(age // 60) if age is not None else -1
+        raise LockBusy(
+            f"上一次运行已经跑了 {mins} 分钟还没结束（pid {pid}），本次让路不抢。"
+            f"⚠️ 它可能卡在网络请求上；超过 "
+            f"{LOCK_ABANDON_SECONDS // 3600} 小时后才会被当作僵死强行夺回。",
+            )
+
     why = []
     if not alive:
         why.append(f"持锁进程 {pid} 已不存在")
-    if age is not None and not fresh:
-        why.append(f"已持锁 {int(age // 60)} 分钟（超过 {LOCK_STALE_SECONDS // 60} 分钟上限）")
-    if not why:
+    elif age is not None:
+        why.append(f"已持锁 {int(age // 3600)} 小时，按僵死处理")
+    if age is None and holder:
+        why.append("锁文件里没有可解析的开始时间")
+    if not holder:
         why.append("锁文件内容无法解析")
-    p.write_text(payload, encoding="utf-8")
-    return p, "夺回陈旧运行锁：" + "；".join(why) + "。上一次运行可能是卡死或被强杀。"
+
+    # ── 原子夺锁 ──
+    # 🔴 「先 unlink 再 O_EXCL 重建」**不够**，这是实测抓出来的：
+    #    A 和 B 都通过了「锁已陈旧」的判定 → A unlink、A 建好新锁 →
+    #    **B 的 unlink 把 A 的新锁删掉** → B 再建自己的 → 双双得手。
+    #    抓到它的是 tests/test_concurrency.py 的四进程 × 15 轮，
+    #    同一进程里顺序调两次 acquire_lock 永远测不出来。
+    #
+    # 所以**抢占动作本身也要互斥**：以「被抢的那把锁的 token」为名建一个
+    # O_EXCL 标记文件，谁建成谁才有权替换。抢同一把锁的进程争同一个标记，
+    # 而抢占成功后锁的 token 就变了 —— 残留的旧标记再没人会去看，
+    # 顶多是垃圾文件（下面顺手清），不会把谁挡死。
+    marker = _state_path(f"{LOCK_FILE}.steal.{holder.get('token') or 'unknown'}")
+    if not _create_lock_exclusive(marker, payload):
+        raise LockBusy("另一个进程正在抢这把陈旧锁，本次让路")
+    try:
+        # 拿到抢占权后再确认一次：锁可能在这几行之间已经被换掉了
+        if _read_lock(p).get("token") != holder.get("token"):
+            raise LockBusy("这把陈旧锁刚被另一个进程接管，本次让路")
+        tmp = _state_path(f"{LOCK_FILE}.new.{token}")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, p)      # 原子替换，不经过「文件不存在」的窗口
+    except OSError as e:
+        raise LockBusy(f"无法替换陈旧锁（{type(e).__name__}），本次跳过")
+    finally:
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        _sweep_steal_markers()
+
+    return p, token, ("夺回陈旧运行锁：" + "；".join(why)
+                      + "。上一次运行可能是卡死或被强杀。")
 
 
-def release_lock(p: Path) -> None:
+def _sweep_steal_markers() -> None:
+    """清掉残留的抢占标记。它们不挡人，只是垃圾 —— 但垃圾也会攒。"""
+    try:
+        for f in state_dir().glob(f"{LOCK_FILE}.steal.*"):
+            try:
+                if (datetime.now().timestamp() - f.stat().st_mtime) > 300:
+                    f.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def release_lock(p: Path, token: str) -> None:
+    """
+    释放运行锁。**先核对 owner token，绝不删别人的锁。**
+
+    不核对的话：A 的锁被 B 夺走后，A 跑完照样把 B 的锁删掉，
+    于是 C 进来又拿到锁 —— 并发保护归零，而且完全无声。
+    """
+    cur = _read_lock(p)
+    if not cur:
+        return                      # 已经没了或读不出来，不折腾
+    if cur.get("token") != token:
+        print("⚠️  运行锁已被其他进程接管，本进程不删它（避免误删别人的锁）",
+              file=sys.stderr)
+        return
     try:
         p.unlink()
     except OSError:

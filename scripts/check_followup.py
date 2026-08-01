@@ -477,16 +477,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── 运行锁：两次同时跑会互相覆盖状态、重复推送 ──
     lock_path = None
+    lock_token = ""
     run_warnings: list[str] = []
     if real_run:
         try:
-            lock_path, steal = core.acquire_lock()
+            lock_path, lock_token, steal = core.acquire_lock()
             if steal:
                 run_warnings.append(steal)
                 alert(f"⚠️ 项目跟进精灵：{steal}", output_cfg)
         except core.LockBusy as e:
-            # 不是故障，安静退出。Hermes 那边表现为一次静默运行。
-            print(f"⏭ 本次跳过：{e}", file=sys.stderr)
+            # 不是故障，安静退出（退出码 0）。Hermes 那边表现为一次静默运行。
+            # 但「上一次跑太久所以让路」这种情况要告警 —— 真卡死的话每天都会跳，
+            # 而「每天静默跳过」和「每天没有超时单」长得一模一样。
+            msg = str(e)
+            print(f"⏭ 本次跳过：{msg}", file=sys.stderr)
+            if "还没结束" in msg:
+                alert(f"⚠️ 项目跟进精灵：{msg}", output_cfg)
             return 0
 
     try:
@@ -494,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
                     active, holidays, run_warnings)
     finally:
         if lock_path:
-            core.release_lock(lock_path)
+            core.release_lock(lock_path, lock_token)
 
 
 def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
