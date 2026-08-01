@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `0.2.0-rc2` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
+> `0.3.0-rc1` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
 
 ## 给业务：只复制下面这一段
 
@@ -175,8 +175,15 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --verify-rea
 FOLLOWUP_HOME="<运行时目录>" python3 scripts/doctor.py --validate-config          # 只查配置，不联网
 FOLLOWUP_HOME="<运行时目录>" python3 scripts/doctor.py                            # 全项自检（联网只读台账）
 
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --dry-run                # 存活监控：只打印判定
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test              # 验告警链路（**会真发消息**）
+
 ./run_tests.sh                                       # 全部自动化测试，零网络
 ```
+
+> `watchdog.py` 由 launchd 定时执行，用来发现「任务根本没跑」——
+> 那是唯一一类连报错都不会产生的失败。**默认没有安装**，装法见
+> [docs/外部监控.md](docs/外部监控.md)。
 
 **`--dry-run`、`--json`、`--today`（不带 `--force-push`）一律严格只读**：
 不发企微、不发告警、不创建或修改任何状态文件，连损坏的状态文件都不会被改名。
@@ -247,8 +254,9 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 
 ## 已知边界
 
-见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.2.0-rc2` 的主要限制：
-WorkBuddy 未实机验证、Windows 未验证、缺独立看门狗、零催办时本地无回执。
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.3.0-rc1` 的主要限制：
+WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**、
+两处引导脚本（`bootstrap.py` 与 `setup.sh`）功能重叠待收敛。
 
 ---
 

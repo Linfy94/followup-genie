@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,11 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# 同上：版本号从 VERSION 文件读，不写死。
+VERSION = (pathlib.Path(__file__).resolve().parent.parent / "VERSION"
+           ).read_text(encoding="utf-8").strip()
+
+
 class SkillMetadataTest(unittest.TestCase):
 
     def test_frontmatter_uses_only_standard_fields(self):
@@ -43,9 +49,9 @@ class ReleasePackageTest(unittest.TestCase):
                 {path.name for path in paths},
                 {
                     "followup-genie-agent.zip",
-                    "followup-genie-agent-0.2.0-rc2.zip",
+                    f"followup-genie-agent-{VERSION}.zip",
                     "followup-genie-workbuddy.skill",
-                    "followup-genie-workbuddy-0.2.0-rc2.skill",
+                    f"followup-genie-workbuddy-{VERSION}.skill",
                     "SHA256SUMS.txt",
                 },
             )

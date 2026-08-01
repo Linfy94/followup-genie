@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import stat
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -35,6 +36,12 @@ def run(command: list[str], *, env: dict[str, str], cwd: Path = ROOT):
         stderr=subprocess.PIPE,
         check=False,
     )
+
+
+# 🔴 从 VERSION 文件读，不写死。
+#    写死的版本号注定过期 —— 每次发版都要有人记得改这里，而没人会记得。
+VERSION = (pathlib.Path(__file__).resolve().parent.parent / "VERSION"
+           ).read_text(encoding="utf-8").strip()
 
 
 class SetupScriptTest(unittest.TestCase):
@@ -104,7 +111,7 @@ class BootstrapTest(unittest.TestCase):
                 (workspace / ".followup-genie" / "VERSION")
                 .read_text(encoding="utf-8")
                 .strip(),
-                "0.2.0-rc2",
+                VERSION,
             )
             self.assertTrue(
                 (workspace / "runtime" / "followup" / "config" / "rules.json")
