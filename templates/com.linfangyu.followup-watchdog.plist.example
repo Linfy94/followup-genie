@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  项目跟进精灵 · 外部存活监控（launchd 模板）
+
+  🛑 这是模板，不是已安装的配置。安装步骤见 docs/外部监控.md。
+     装之前把下面三处 <请改成…> 换成真实路径。
+
+  为什么用 launchd 而不是 hermes cron：
+    被监控的正是 hermes 的调度器。gateway 没起来时，
+    「检查 gateway 起没起来」的那个任务同样不会执行 —— 循环依赖。
+    launchd 是 macOS 自带的，与 Hermes 无关，这才叫外部。
+
+  为什么用 /usr/bin/python3 而不是 hermes 的 venv：
+    同样的道理。hermes 装坏了，监控器不能跟着一起哑掉。
+    watchdog.py 只用标准库，系统自带的 3.9 就够。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.linfangyu.followup-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>请改成…/skills/work/followup-genie/scripts/watchdog.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- 运行时目录。必须与主任务用的是同一个，否则监控器看的
+             不是主任务写的那个 health.json，会永远报「从来没跑过」。 -->
+        <key>FOLLOWUP_HOME</key>
+        <string>请改成…/.hermes</string>
+        <!-- hermes 可执行文件所在目录要在 PATH 里，告警才发得出去。
+             launchd 的默认 PATH 很短，不含 ~/.local/bin。 -->
+        <key>PATH</key>
+        <string>请改成…/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- 开机/登录就查一次：关机几天后开机，能立刻发现而不用等到下一个整点 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 每天两次。主任务 9:00 跑，10:30 留足余量；
+         15:30 那次是防止上午那一次恰好落在关机时段。
+         错过的时刻 launchd 会在唤醒后补跑一次。 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>10</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>15</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>请改成…/.hermes/followup/state/watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>请改成…/.hermes/followup/state/watchdog.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

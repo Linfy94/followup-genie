@@ -15,6 +15,20 @@
     ]
   },
 
+  "watchdog": {
+    "enabled": true,
+    "schedule_hour": 9,
+    "count_weekends": false,
+    "_count_weekends说明": "周末那一班算不算「本该跑」。电脑周末可能关机时设 false。🔴 这只影响存活监控的告警判定，不改推送时刻——定时任务几点跑由宿主的调度决定。",
+    "missed_runs_before_alert": 2,
+    "_missed说明": "错过几次本该执行的时刻才告警。设 1 会因一次网络抖动就吵。",
+    "absolute_max_hours": 168,
+    "_absolute说明": "兜底上限。防止班次逻辑本身被配错，把整个监控静音了还没人发现。",
+    "repeat_alert_hours": 24,
+    "missing_health_grace_hours": 36,
+    "_安装说明": "监控器由 launchd 执行，默认没装。装法见 docs/外部监控.md。没装之前「能发现任务根本没跑」只是能力，不是闭环。"
+  },
+
   "reminders": {
     "write": false,
     "_write说明": "false = 演练模式：只把「本该创建/更新哪些提醒」打印到 stdout，不调用任何 osascript 写入命令。迁到业务电脑后人工改 true。",

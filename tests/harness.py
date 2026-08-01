@@ -38,6 +38,7 @@ import qqdoc         # noqa: E402
 import wecom_push    # noqa: E402
 import check_followup  # noqa: E402
 import doctor        # noqa: E402
+import watchdog      # noqa: E402
 import reminders_sync  # noqa: E402,F401  —— 让打桩点可被测试引用
 
 SERIAL_EPOCH = qqdoc.SERIAL_EPOCH
