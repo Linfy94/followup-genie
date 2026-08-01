@@ -161,15 +161,48 @@ class NotifyCommitTest(unittest.TestCase):
             self.assertIn("运行摘要", r.out)
             self.assertEqual(r.posts, [], "打印摘要不等于要推送")
 
-    def test_nothing_due_is_silent_and_succeeds(self):
+    def test_nothing_due_sends_nothing_but_still_leaves_a_receipt(self):
+        """
+        🔴 **刻意的行为变更（2026-08-01）**：以前这里断言「完全静默」。
+
+        企微不发是对的（无事不发是降噪的一部分），但**本地运行结果不该跟着消失**：
+        stdout 为空时 Hermes 把这次运行记成 `[SILENT]`，业务手动点一下，
+        看到的就是「毫无反应」—— 而那和「今天压根没跑起来」长得一模一样。
+
+        所以现在：企微仍然一条不发，本地必留一行回执。
+        """
         fresh = make_sheet([
             row(1, "甲公司", tech="待收资", reported=TODAY, progress=TODAY),
         ])
-        with temp_home():
+        with temp_home() as home:
             r = run_main([f"--today={TODAY}", "--force-push"], fresh)
             self.assertEqual(r.code, 0)
-            self.assertEqual(r.posts, [], "无事不发")
-            self.assertEqual(r.out.strip(), "", "无事发生时应完全静默")
+            self.assertEqual(r.posts, [], "无事不发 —— 企微一条都不许发")
+            self.assertIn("检查完成", r.out, "真实运行必须留一行本地回执")
+            self.assertIn("待催 0 项", r.out)
+
+            fs = read_state(home, "followup_state.json") or {}
+            self.assertEqual([k for k, v in fs.items() if v.get("last_notified")],
+                             [], "没发就不许记已通知")
+
+            # Hermes --no-agent 模式下 stdout 可能被吞，摘要必须同时落进 health
+            h = read_state(home, "health.json")
+            self.assertIn("last_run_summary", h, "摘要要落盘，不能只在 stdout")
+            self.assertEqual(h["last_run_summary"]["due"], 0)
+            self.assertEqual(h["last_run_summary"]["read"], 1)
+
+    def test_diagnostic_modes_stay_completely_silent(self):
+        """对照组：回执只给真实运行。诊断模式无事发生时仍然一个字都不打。"""
+        fresh = make_sheet([
+            row(1, "甲公司", tech="待收资", reported=TODAY, progress=TODAY),
+        ])
+        # 必须带 --today：不带的话用的是真实今天，这条数据早就超期了，
+        # 测的就不是「无事发生」而是「有事但不发」了。
+        for argv in ([f"--today={TODAY}", "--dry-run"], [f"--today={TODAY}"]):
+            with self.subTest(argv=argv):
+                with temp_home():
+                    r = run_main(argv, fresh)
+                    self.assertEqual(r.out.strip(), "", f"{argv} 应完全静默")
 
 
 class PrimaryChannelTest(unittest.TestCase):

@@ -385,6 +385,27 @@ def check_health(doc: Doc) -> None:
     if h.get("last_wecom_ok"):
         doc.add(OK, f"上次企微推送成功：{h.get('last_wecom_ok')}")
 
+    # ── 最近一次运行摘要 ──
+    # Hermes --no-agent 模式下 stdout 可能不落在人眼前，这份摘要是事后
+    # 唯一能回答「上次到底读了多少、催了几个、发没发出去」的地方。
+    s = h.get("last_run_summary")
+    if isinstance(s, dict):
+        doc.add(OK, f"最近一次运行摘要（{s.get('at', '时间未记')}）",
+                f"读取 {s.get('read')} 项 ｜ 待催 {s.get('due')} 项 ｜ "
+                f"静默期 {s.get('muted')} 项\n"
+                f"消息 {s.get('messages')} 条 ｜ 投递：{s.get('delivery')}\n"
+                f"数据质量提示 {s.get('data_quality_warnings')} 条")
+
+    # ── 状态损坏的恢复事件 ──
+    # 坏文件被改名保留过一次，就该一直看得见，直到有人处理掉。
+    rec = h.get("last_recovery")
+    if isinstance(rec, dict):
+        doc.add(WARN, f"曾从状态损坏中恢复过（{rec.get('at', '时间未记')}）",
+                f"受损：{'、'.join(rec.get('damaged') or []) or '未记录'}\n"
+                f"已保留为：{'、'.join(rec.get('files') or []) or '（未能改名）'}\n"
+                "坏文件没有删除。确认无用后可自行清理，"
+                "但先看一眼里面是不是有值得捞回来的记录。")
+
 
 def check_state(doc: Doc) -> None:
     se = core.read_state("stage_entered.json")

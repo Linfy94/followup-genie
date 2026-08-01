@@ -505,6 +505,13 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
     stage_entered = core.read_state("stage_entered.json")
     stage_history = core.read_state("stage_history.json")
     followup_state = core.read_state("followup_state.json")
+    # 🔴 health.json 自己也要在这里读一次（返回值用不上，只为它的副作用）。
+    #    以前它第一次被碰到是在后面的 update_health() 内部，而 update_health()
+    #    把所有异常吞成一行 stderr —— 不登记 STATE_DAMAGE、不隔离、不告警。
+    #    结果是：健康记录自己骨折了，反而是最没人发现的那种坏法，还会被静默重建，
+    #    连「上次成功是什么时候」都一起丢掉。放到这里读，它就和其余状态文件
+    #    共用下面这套「登记 → 隔离保留 → 告警 → last_recovery」的机制。
+    core.read_health()
     # read_state 可能已经登记了「状态文件损坏」。这是重大降级，不能只在报告里
     # 显示就算了 —— stage_entered 损坏意味着全部项目按「最新进展日期」重新初始化，
     # 停滞天数集体失真，必须有人立刻知道。
@@ -577,6 +584,26 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
         core.update_health(last_fetch_ok=core.now_iso())
 
     total_due = sum(len(r.due) for r in reports)
+    read_count = sum(r.total_rows for r in reports)
+    muted_count = sum(len(r.overdue_muted) for r in reports)
+    dq_warnings = sum(len(_problems(r)) for r in reports)
+
+    # ── 主通道投递 ──
+    # 提到输出之前：投递不依赖渲染出来的文本，先做掉才能把「发没发出去」
+    # 一并写进下面那段输出里。企微那边一个字都没变，只是调用顺序前移。
+    delivered, delivery = _deliver(args, reports, today, output_cfg, primary,
+                                   total_due, real_run)
+
+    if real_run:
+        core.update_health(last_run_summary={
+            "at": core.now_iso(),
+            "read": read_count,
+            "due": total_due,
+            "muted": muted_count,
+            "messages": delivery.get("total"),
+            "delivery": delivery.get("summary"),
+            "data_quality_warnings": dq_warnings,
+        })
 
     # ── 输出 ──
     if args.json:
@@ -587,13 +614,19 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
         # 有待催、有故障、有数据质量问题时都要输出。
         # 只有「一切正常且今天没有超时单」才完全静默 —— 但 --verbose 是
         # 诊断开关，它下面的静默毫无用处（排查时最想看的正是「今天为什么没有」）。
-        print(render(reports, today, write_on, output_cfg,
-                     verbose=args.verbose, run_warnings=run_warnings))
-    # else: 完全静默 —— 无事不发
-
-    # ── 主通道投递 ──
-    delivered = _deliver(args, reports, today, output_cfg, primary,
-                         total_due, real_run)
+        text = render(reports, today, write_on, output_cfg,
+                      verbose=args.verbose, run_warnings=run_warnings)
+        if real_run:
+            # 清单末尾补一行投递结果：清单本身不能证明它发出去了。
+            text = f"{text}\n投递：{delivery['summary']}"
+        print(text)
+    elif real_run:
+        # 🔴 真实运行至少留一行回执。以前这里是完全静默，于是「今天没有超时单」
+        #    和「今天压根没跑起来」在日志上长得一模一样 —— 业务手动点一下，
+        #    看到的就是毫无反应。企微该不发还是不发，变的只是本地这行字。
+        print(f"✅ 检查完成：读取 {read_count} 项，待催 {total_due} 项，"
+              f"静默期 {muted_count} 项，{delivery['summary']}。")
+    # else: 诊断模式（--dry-run / 不带 --force-push 的 --today）维持完全静默
 
     # ── 写入本地状态 ──
     # 🔴 两级拆分，这是本次修复的核心：
@@ -653,18 +686,31 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
 
 def _deliver(args, reports, today, output_cfg, primary, total_due, real_run):
     """
-    走主通道投递。返回 True(完整送达) / False(失败) / None(无需投递)。
+    走主通道投递。返回 (delivered, detail)。
 
+    delivered 的语义与此前**完全一致**，调用方的判断一个字都不用改：
+      True(完整送达) / False(失败) / None(无需投递)。
     None 的两种情形：今天没有待催（无事不发），或试跑模式被闸门拦下。
     这两种都**不构成送达凭证**，所以也不会提交 last_notified —— 但也不算故障。
+
+    detail 是本次新增的展示信息，形状固定：
+      {"channel", "attempted", "sent", "total", "summary"}
+    只用于那行本地回执和 health.json 的 last_run_summary，**不参与任何判定**。
     """
+    label = "企微" if primary == "wecom_webhook" else "stdout"
+
     if not total_due:
-        return None
+        return None, {"channel": primary, "attempted": False, "sent": 0,
+                      "total": 0, "summary": f"{label}未发送"}
 
     if primary == "stdout":
         # 没有企微通道时的退路。stdout 打印即视为送达 —— 但这没有任何投递保证，
         # doctor 会就此提醒。
-        return True if real_run else None
+        if real_run:
+            return True, {"channel": "stdout", "attempted": True, "sent": 1,
+                          "total": 1, "summary": "stdout 已输出待催清单"}
+        return None, {"channel": "stdout", "attempted": False, "sent": 0,
+                      "total": 0, "summary": "stdout 试跑，未产生投递凭证"}
 
     try:
         import wecom_push
@@ -675,6 +721,8 @@ def _deliver(args, reports, today, output_cfg, primary, total_due, real_run):
     except Exception as e:
         msg = f"企微推送异常 {type(e).__name__}: {e}"
         print(f"🔴 {msg}", file=sys.stderr)
+        detail = {"channel": "wecom_webhook", "attempted": True, "sent": 0,
+                  "total": 0, "summary": f"企微推送异常：{type(e).__name__}"}
         if real_run:
             ok, why = alert(
                 f"🔴 项目跟进精灵：{msg}\n业务今天没收到催办清单"
@@ -684,17 +732,22 @@ def _deliver(args, reports, today, output_cfg, primary, total_due, real_run):
                               "reason": msg},
                 alert_ok=ok, alert_detail=why,
             )
-        return False if real_run else None
+            return False, detail
+        return None, detail
 
     if not res.attempted:
-        return None
+        return None, {"channel": "wecom_webhook", "attempted": False, "sent": 0,
+                      "total": res.total,
+                      "summary": f"企微未发送（{res.skipped_reason}）"}
     if res.ok:
         if real_run:
             core.update_health(last_wecom_ok=core.now_iso())
-        return True
+        return True, {"channel": "wecom_webhook", "attempted": True,
+                      "sent": res.sent, "total": res.total,
+                      "summary": f"企微已送达 {res.sent}/{res.total} 条"}
 
+    head = "部分失败" if res.partial else "全部失败"
     if real_run:
-        head = "部分失败" if res.partial else "全部失败"
         body = (f"🔴 项目跟进精灵：企微推送{head}，业务今天收到的清单不完整\n"
                 f"日期 {today.isoformat()}，本应推 {total_due} 项 / "
                 f"{res.total} 条消息，成功 {res.sent} 条\n"
@@ -707,7 +760,9 @@ def _deliver(args, reports, today, output_cfg, primary, total_due, real_run):
             alert_ok=ok, alert_detail=why,
             consecutive_failures=int(h.get("consecutive_failures") or 0) + 1,
         )
-    return False
+    return False, {"channel": "wecom_webhook", "attempted": True,
+                   "sent": res.sent, "total": res.total,
+                   "summary": f"企微{head} {res.sent}/{res.total} 条"}
 
 
 def _print_json(reports, today, write_on, failures) -> None:
