@@ -48,6 +48,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import uuid
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -448,6 +449,23 @@ def render_plist(python: str, script: Path, home: Path, hour: int) -> str:
     return plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
 
 
+def _atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
+    """先完整写同目录临时文件，再原子替换；失败时旧文件保持不变。"""
+    tmp = path.with_name(f".{path.name}.new.{uuid.uuid4().hex}")
+    try:
+        with tmp.open("xb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, mode)
+        os.replace(str(tmp), str(path))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def install(version: str = "") -> tuple[Path, Path, str]:
     """
     把监控器复制到 skill 之外，并生成填好路径的 plist。
@@ -461,15 +479,15 @@ def install(version: str = "") -> tuple[Path, Path, str]:
     d.mkdir(parents=True, exist_ok=True)
 
     script = d / "watchdog.py"
-    shutil.copyfile(Path(__file__).resolve(), script)
-    os.chmod(script, 0o755)
+    source_bytes = Path(__file__).resolve().read_bytes()
+    _atomic_write(script, source_bytes, 0o755)
 
-    (d / "VERSION").write_text(version or "unknown", encoding="utf-8")
+    _atomic_write(d / "VERSION", (version or "unknown").encode("utf-8"))
 
     cfg, _ = load_config()
     plist = d / f"{LAUNCHD_LABEL}.plist"
-    plist.write_text(render_plist(python, script, home, cfg["schedule_hour"]),
-                     encoding="utf-8")
+    plist_text = render_plist(python, script, home, cfg["schedule_hour"])
+    _atomic_write(plist, plist_text.encode("utf-8"))
     return script, plist, python
 
 

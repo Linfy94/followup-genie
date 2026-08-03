@@ -29,6 +29,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from harness import temp_home       # noqa: F401 —— 顺带把 scripts/ 挂上 sys.path
 
@@ -85,6 +86,35 @@ class InstallLocationTest(unittest.TestCase):
                 for call in run.call_args_list:
                     argv = call.args[0] if call.args else []
                     self.assertNotIn("launchctl", " ".join(map(str, argv)))
+
+    def test_installed_copy_can_reinstall_itself(self):
+        """业务从独立副本执行更新时，不能因源和目标是同一文件而失败。"""
+        with temp_home() as home:
+            script, _, _ = watchdog.install("old")
+            env = os.environ.copy()
+            env["FOLLOWUP_HOME"] = str(home)
+
+            result = subprocess.run(
+                [sys.executable, str(script), "--install", "--version", "new"],
+                capture_output=True, text=True, env=env, timeout=120)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((home / "watchdog" / "VERSION")
+                             .read_text(encoding="utf-8"), "new")
+
+    def test_failed_reinstall_keeps_the_previous_working_copy(self):
+        """发布新副本失败时，旧副本必须仍是完整可运行文件。"""
+        with temp_home() as home:
+            script, _, _ = watchdog.install("old")
+            previous = script.read_bytes()
+
+            with mock.patch.object(watchdog.os, "replace",
+                                   side_effect=PermissionError("只读")):
+                with self.assertRaises(PermissionError):
+                    watchdog.install("new")
+
+            self.assertEqual(script.read_bytes(), previous,
+                             "原地覆盖失败不应留下半个 watchdog.py")
 
 
 class PythonDetectionTest(unittest.TestCase):
