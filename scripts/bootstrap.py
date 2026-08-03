@@ -36,6 +36,54 @@ def should_ignore(_directory: str, names: Iterable[str]) -> set[str]:
     return {name for name in names if _manifest.should_skip(name)}
 
 
+def _validate_managed_paths(source: Path, destination: Path) -> None:
+    """复制前拒绝会越界写入的链接和会造成半升级的类型冲突。"""
+    if source.is_symlink() or destination.is_symlink():
+        raise BootstrapError("安装包目录和目标程序目录不能是符号链接")
+
+    for name in PACKAGE_FILES:
+        src = source / name
+        if src.is_symlink() or not src.is_file():
+            raise BootstrapError(f"安装包中的 {name} 必须是普通文件")
+        dst = destination / name
+        if dst.is_symlink():
+            raise BootstrapError(f"目标程序中的 {name} 是符号链接，已停止以免越界写入")
+        if dst.exists() and not dst.is_file():
+            raise BootstrapError(f"目标程序中的 {name} 应该是文件，实际类型不一致")
+        if dst.exists() and dst.stat().st_nlink > 1:
+            raise BootstrapError(f"目标程序中的 {name} 是硬链接，已停止以免覆盖外部文件")
+
+    for name in PACKAGE_DIRS:
+        src = source / name
+        if src.is_symlink() or not src.is_dir():
+            raise BootstrapError(f"安装包中的 {name}/ 必须是普通目录")
+        dst = destination / name
+        if dst.is_symlink():
+            raise BootstrapError(f"目标程序中的 {name}/ 是符号链接，已停止以免越界写入")
+        if dst.exists() and not dst.is_dir():
+            raise BootstrapError(f"目标程序中的 {name}/ 应该是目录，实际类型不一致")
+
+        for base, dirs, files in os.walk(src, followlinks=False):
+            for child in dirs + files:
+                p = Path(base) / child
+                if p.is_symlink():
+                    rel = p.relative_to(source)
+                    raise BootstrapError(f"安装包中不接受符号链接：{rel}")
+
+        if not dst.exists():
+            continue
+        for base, dirs, files in os.walk(dst, followlinks=False):
+            for child in dirs + files:
+                p = Path(base) / child
+                rel = p.relative_to(destination)
+                if p.is_symlink():
+                    raise BootstrapError(
+                        f"目标程序中的 {rel} 是符号链接，已停止以免越界写入")
+                if p.is_file() and p.stat().st_nlink > 1:
+                    raise BootstrapError(
+                        f"目标程序中的 {rel} 是硬链接，已停止以免覆盖外部文件")
+
+
 def retire_stale_code(source: Path, destination: Path) -> list[str]:
     """
     把上一版有、这一版没有的文件挪出执行路径，返回被挪走的相对路径。
@@ -63,13 +111,15 @@ def retire_stale_code(source: Path, destination: Path) -> list[str]:
     ═══════════════════════════════════════════════════════════════════
     """
     retired: list[str] = []
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     backup = destination / f".upgrade-backup-{stamp}"
 
     def move(item: Path, rel: str) -> None:
         target = backup / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(item), str(target))
+        # 备份与程序目录在同一文件系统；os.replace 是单次原子改名，失败时
+        # 源文件仍在原位，不会出现「源已删、备份又没写成」。
+        os.replace(str(item), str(target))
         retired.append(rel)
 
     for name in PACKAGE_DIRS:
@@ -107,6 +157,7 @@ def copy_package(source: Path, destination: Path) -> list[str]:
 
     try:
         destination.mkdir(parents=True, exist_ok=True)
+        _validate_managed_paths(source, destination)
         for name in PACKAGE_FILES:
             src = source / name
             if src.is_file():

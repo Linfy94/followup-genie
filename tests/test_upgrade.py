@@ -31,6 +31,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from harness import temp_home       # noqa: F401 —— 顺带挂 sys.path
 
@@ -269,6 +270,66 @@ class BusinessDataIsUntouchedTest(unittest.TestCase):
                     for p in skill.iterdir() if p.is_dir()),
                 "旧代码应该被挪进备份目录而不是删掉")
             self.assertIn("移出执行路径", r.stdout, "挪走了要说一声")
+
+
+class ManagedPathSafetyTest(unittest.TestCase):
+    """安装器只能修改 Skill 自己的真实文件，不能顺链接写到目录外。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fg-path-safe-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.dest = self.root / "skill"
+        self.dest.mkdir()
+
+    def test_managed_directory_symlink_is_rejected_before_copy(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("不能动", encoding="utf-8")
+        (self.dest / "scripts").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.copy_package(ROOT, self.dest)
+
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "不能动")
+        self.assertFalse((outside / "core.py").exists(),
+                         "🔴 安装器顺着符号链接把代码写到了 Skill 外面")
+
+    def test_managed_hardlink_is_rejected_before_copy(self):
+        outside = self.root / "outside.py"
+        outside.write_text("不能覆盖", encoding="utf-8")
+        (self.dest / "scripts").mkdir()
+        os.link(str(outside), str(self.dest / "scripts" / "core.py"))
+
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.copy_package(ROOT, self.dest)
+
+        self.assertEqual(outside.read_text(encoding="utf-8"), "不能覆盖",
+                         "🔴 覆盖硬链接等于改了管理范围外的文件")
+
+    def test_type_collision_fails_before_any_package_file_is_overwritten(self):
+        readme = self.dest / "README.md"
+        readme.write_text("旧版 README", encoding="utf-8")
+        (self.dest / "scripts").write_text("这里本应是目录", encoding="utf-8")
+
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.copy_package(ROOT, self.dest)
+
+        self.assertEqual(readme.read_text(encoding="utf-8"), "旧版 README",
+                         "预检失败前不应已经覆盖一半文件")
+
+    def test_failed_atomic_move_keeps_the_source_file(self):
+        bootstrap.copy_package(ROOT, self.dest)
+        stale = self.dest / "scripts" / "旧 文件🧚\n.py"
+        stale.write_text("保留我", encoding="utf-8")
+
+        with mock.patch.object(bootstrap.os, "replace",
+                               side_effect=PermissionError("只读")):
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap.copy_package(ROOT, self.dest)
+
+        self.assertTrue(stale.is_file(), "移动失败时源文件不能消失")
+        self.assertEqual(stale.read_text(encoding="utf-8"), "保留我")
 
 
 if __name__ == "__main__":
