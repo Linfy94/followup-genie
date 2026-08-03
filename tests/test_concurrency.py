@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import unittest
 from datetime import date, timedelta
+from unittest import mock
 
 from harness import (core, make_sheet, row, temp_home, run_main, read_state)
 
@@ -191,6 +193,82 @@ class OwnerTokenTest(unittest.TestCase):
             self.assertEqual(data["token"], tok_b, "锁仍属于 B")
 
 
+def write_marker(home, token, *, seconds_ago: int):
+    """造一个抢锁标记，并把 mtime 拨老 —— 模拟进程死在抢锁半路。"""
+    p = home / "followup" / "state" / f"{core.LOCK_FILE}.steal.{token}"
+    p.write_text("{}", encoding="utf-8")
+    t = time.time() - seconds_ago
+    os.utime(p, (t, t))
+    return p
+
+
+class StealMarkerRecoveryTest(unittest.TestCase):
+    """
+    🔴 0.3.0-rc2 修的头号问题：**残留的抢锁标记会把运行永久堵死。**
+
+    进程在建完标记之后、unlink 之前被 SIGKILL（关机、强杀、OOM），
+    标记就留在盘上。锁没被替换 → holder token 不变 → 下次算出**同一个**
+    标记名 → 永远建不上 → 每天 LockBusy。
+
+    而当时的清理函数只在「抢到标记之后」的 finally 里跑，
+    正好够不着自己造成的死锁。修复前实测：连试三次，三次都被堵死。
+    """
+
+    def test_stale_marker_is_recovered(self):
+        with temp_home() as home:
+            write_lock(home, pid=999_999, minutes_ago=60, token="T")
+            marker = write_marker(home, "T", seconds_ago=300)
+
+            path, token, steal = core.acquire_lock()
+            self.assertIsNotNone(steal, "夺陈旧锁必须告警")
+            self.assertFalse(marker.exists(), "残留标记应被清掉")
+            core.release_lock(path, token)
+
+    def test_stale_marker_does_not_block_forever(self):
+        """修复前这个循环三次全是 LockBusy。"""
+        with temp_home() as home:
+            write_lock(home, pid=999_999, minutes_ago=60, token="T")
+            write_marker(home, "T", seconds_ago=300)
+
+            for attempt in range(3):
+                try:
+                    path, token, _ = core.acquire_lock()
+                except core.LockBusy as e:
+                    self.fail(f"第 {attempt + 1} 次仍被残留标记堵死：{e}")
+                core.release_lock(path, token)
+                # 下一轮重新布置同样的现场
+                write_lock(home, pid=999_999, minutes_ago=60, token="T")
+                write_marker(home, "T", seconds_ago=300)
+
+    def test_fresh_marker_still_yields(self):
+        """
+        自愈不能矫枉过正：标记还新鲜，说明**真有**另一个进程正在抢，
+        这时必须让路。踢掉它就等于两个进程同时夺锁 —— 正是标记要防的事。
+        """
+        with temp_home() as home:
+            write_lock(home, pid=999_999, minutes_ago=60, token="T")
+            marker = write_marker(home, "T", seconds_ago=1)
+
+            with self.assertRaises(core.LockBusy):
+                core.acquire_lock()
+            self.assertTrue(marker.exists(), "新鲜标记不该被清掉")
+
+    def test_sweep_runs_at_entry_not_only_on_success(self):
+        """清理必须在入口跑 —— 放在成功后的 finally 里就够不着死锁。"""
+        with temp_home() as home:
+            old = write_marker(home, "早就没人要的token", seconds_ago=600)
+            path, token, _ = core.acquire_lock()   # 空锁，一次就成功
+            self.assertFalse(old.exists(), "入口那次 sweep 应该清掉它")
+            core.release_lock(path, token)
+
+    def test_marker_for_a_different_lock_is_left_alone_when_fresh(self):
+        with temp_home() as home:
+            other = write_marker(home, "别人的token", seconds_ago=5)
+            path, token, _ = core.acquire_lock()
+            self.assertTrue(other.exists(), "新鲜的别家标记不该被误清")
+            core.release_lock(path, token)
+
+
 class RealRaceTest(unittest.TestCase):
     """
     真·双进程竞态。
@@ -255,6 +333,115 @@ class RealRaceTest(unittest.TestCase):
                 self.assertEqual(
                     kinds.count("ok"), 1,
                     f"🔴 第 {i+1} 轮有 {kinds.count('ok')} 个进程同时夺到锁：{got}")
+
+    def test_exactly_one_wins_when_a_stale_marker_is_left_behind(self):
+        """
+        🔴 0.3.0-rc2 的核心并发回归：**自愈不能把互斥一起愈掉。**
+
+        现场是最糟的那种 —— 陈旧锁 + 残留标记，四个进程同时进来。
+        它们会同时发现标记残留、同时想 unlink 后重建。
+        只要有一轮出现两个 ok，就说明清理动作本身把互斥破坏了。
+
+        单进程顺序调用永远测不出这一条。
+        """
+        def prep(home):
+            write_lock(home, pid=999_999, minutes_ago=60, token="T")
+            write_marker(home, "T", seconds_ago=300)
+
+        with temp_home() as home:
+            for i, got in enumerate(self._race(home, prep=prep)):
+                kinds = [k for k, _ in got]
+                self.assertNotIn("error", kinds, f"第 {i+1} 轮出异常：{got}")
+                self.assertNotIn("barrier-failed", kinds, f"第 {i+1} 轮同步失败")
+                self.assertEqual(
+                    kinds.count("ok"), 1,
+                    f"🔴 第 {i+1} 轮有 {kinds.count('ok')} 个进程同时夺到锁：{got}")
+
+    def test_lock_released_mid_acquire_does_not_let_two_in(self):
+        """
+        🔴 真实竞态窗口，靠 15 轮四进程实测抓出来的（第 11 轮 2 个 ok）：
+
+          A 持锁 → B 的 O_EXCL 失败 → **A 释放** → B 读锁读到空
+            → holder 是 {}、token 是 None
+              → 走进夺锁路径，而「token 有没有变」拿 None 和 None 比
+                → 必然相等 → 校验通过 → os.replace
+                  → C 同时也这么干 → **两个进程同时持锁**
+
+        这里用 mock 把那个窗口固定下来：O_EXCL 第一次失败、读锁读到空。
+        正确行为是重新走一次 O_EXCL，而不是去夺一把根本不存在的锁。
+        """
+        with temp_home() as home:
+            p = home / "followup" / "state" / core.LOCK_FILE
+            calls = {"n": 0}
+            real_create = core._create_lock_exclusive
+
+            def flaky(path, payload):
+                # 第一次假装被别人抢先，之后恢复真实行为
+                if path == p and calls["n"] == 0:
+                    calls["n"] += 1
+                    return False
+                return real_create(path, payload)
+
+            with mock.patch.object(core, "_create_lock_exclusive", flaky):
+                path, token, steal = core.acquire_lock()
+
+            self.assertIsNone(steal, "锁不存在时不该报「夺回陈旧锁」")
+            self.assertEqual(core._read_lock(p).get("token"), token)
+            core.release_lock(path, token)
+
+    def test_half_created_lock_is_never_stolen(self):
+        """
+        🔴 这是 15 轮四进程反复抓到「2 个赢家」的**真正**根因。
+
+        `_create_lock_exclusive` 是 `os.open(O_EXCL)` 之后才 `os.write`——
+        这两个系统调用之间，锁文件是 **0 字节**的。而空内容 parse 出来是 `{}`，
+        与「锁文件损坏」完全无法区分：
+
+          A: open(O_EXCL) 成功，还没 write
+            B: open 失败 → 读到 0 字节 → 判成「损坏的陈旧锁」→ 夺走
+              → A 的 fd 指向已被 os.replace 掉的旧 inode，
+                A 仍以为自己持锁 → **两个进程同时在跑**
+
+        合法的废弃锁一定有内容，所以空文件只可能是这个中间态。
+        """
+        with temp_home() as home:
+            p = home / "followup" / "state" / core.LOCK_FILE
+            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            try:
+                self.assertEqual(p.stat().st_size, 0, "先造出那个中间态")
+                with self.assertRaises(core.LockBusy) as ctx:
+                    core.acquire_lock()
+                self.assertIn("正在创建", str(ctx.exception))
+            finally:
+                os.close(fd)
+
+    def test_whitespace_only_lock_is_also_treated_as_half_created(self):
+        with temp_home() as home:
+            p = home / "followup" / "state" / core.LOCK_FILE
+            p.write_text("   \n", encoding="utf-8")
+            with self.assertRaises(core.LockBusy):
+                core.acquire_lock()
+
+    def test_garbage_lock_is_still_reclaimable(self):
+        """
+        自愈不能矫枉过正：**有内容**但解析不了的锁，仍然该夺回。
+        那才是真的损坏，不夺的话催办会永久停摆。
+        """
+        with temp_home() as home:
+            p = home / "followup" / "state" / core.LOCK_FILE
+            p.write_text("这不是 JSON", encoding="utf-8")
+            path, token, steal = core.acquire_lock()
+            self.assertIsNotNone(steal, "损坏的锁应该被夺回并告警")
+            core.release_lock(path, token)
+
+    def test_empty_lock_race_is_stable_under_repetition(self):
+        """把空锁竞态多跑几轮 —— 那个窗口只在负载高时才够宽。"""
+        with temp_home() as home:
+            for i, got in enumerate(self._race(home)):
+                kinds = [k for k, _ in got]
+                self.assertEqual(
+                    kinds.count("ok"), 1,
+                    f"🔴 第 {i+1} 轮有 {kinds.count('ok')} 个进程同时拿到锁：{got}")
 
     def test_tokens_are_unique_across_processes(self):
         with temp_home() as home:

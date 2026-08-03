@@ -107,7 +107,22 @@ ENVEOF
   echo "✅ 已创建 ${ENVF}（权限 600，内容为空待填）"
 fi
 
-# ── 4. 不联网自检 ──
+# ── 4. 把存活监控装到 skill 之外 ──
+#
+# 🔴 监控器必须活在 skill 目录外面。它留在包里的话，skill 被移动、删除、
+#    或者升级装坏时，launchd 指向的文件就没了 —— 监控器跟着被监控对象
+#    一起消失，而那正是它最该报警的场景。
+#
+# 每次安装/升级都刷一遍，副本因此自动跟着版本走。
+# **不执行 launchctl load** —— 装不装由人决定，脚本只把东西放好。
+echo
+echo "── 存活监控（装到运行目录，与 skill 解耦）──"
+set +e
+FOLLOWUP_HOME="${HOME_DIR}" python3 "${SKILL_DIR}/scripts/watchdog.py" \
+  --install --version "$(cat "${SKILL_DIR}/VERSION" 2>/dev/null || echo unknown)"
+set -e
+
+# ── 5. 不联网自检 ──
 echo
 echo "── 配置自检（不联网）──"
 set +e

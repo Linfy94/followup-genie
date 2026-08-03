@@ -5,4 +5,10 @@
 # 提醒事项全部打桩。跑多少遍都不会打扰业务群里的真人。
 set -euo pipefail
 cd "$(dirname "$0")"
-exec python3 -m unittest discover -s tests "$@"
+
+# -W error::ResourceWarning —— 未关闭的文件句柄**直接判失败**。
+#
+# 这类警告平时只是刷屏，容易被无视，但它指向的是真问题：
+# 忘了关的句柄在长跑进程里会累积，最后撞上 ulimit。
+# 与其靠人盯输出，不如让它跑红。
+exec python3 -W error::ResourceWarning -m unittest discover -s tests "$@"

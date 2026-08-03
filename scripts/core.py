@@ -398,6 +398,14 @@ LOCK_FILE = ".run.lock"
 LOCK_STALE_SECONDS = 30 * 60        # 超过它才考虑「是不是卡住了」
 LOCK_ABANDON_SECONDS = 6 * 60 * 60  # 进程还活着也当它僵死的绝对上限
 
+# 抢锁标记多久算「残留」。
+#
+# 🔴 正常抢占从建标记到 unlink 之间只有几个系统调用（读锁、写临时文件、
+#    os.replace），毫秒级。120 秒之后标记还在，只可能是那个进程死了。
+#    取 120 而不是更短，是给极端慢的磁盘留余量 —— 判早了会把正在抢锁的
+#    进程踢掉，那正是标记要防的事。
+STEAL_MARKER_STALE_SECONDS = 120
+
 
 class LockBusy(Exception):
     """另一次运行正在进行。不是故障 —— 调用方应安静退出（退出码 0）。"""
@@ -434,10 +442,64 @@ def _create_lock_exclusive(p: Path, payload: str) -> bool:
     except FileExistsError:
         return False
     try:
+        # ⚠️ 建文件与写内容之间，别的进程会看到一个 0 字节的锁。
+        #    单次 os.write 已经是能做到的最窄窗口（O_EXCL 要求先建文件，
+        #    没法「先写好再让它可见」）。读侧因此必须把空文件当成
+        #    「正在创建」而不是「损坏的陈旧锁」—— 见 acquire_lock。
         os.write(fd, payload.encode("utf-8"))
     finally:
         os.close(fd)
     return True
+
+
+def _claim_steal_right(marker: Path, payload: str) -> None:
+    """
+    取「抢这把陈旧锁」的资格。拿不到就 LockBusy。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 这个函数存在的唯一理由：**标记残留会把运行永久堵死。**
+
+    0.3.0-rc1 的实现是「建不上标记就 LockBusy」，看起来对，实际有个
+    致命缺口 —— 进程在建完标记之后、`finally` 的 unlink 之前被 SIGKILL
+    （关机、强杀、OOM）：
+
+        标记 .run.lock.steal.<T> 留在盘上
+          → 锁文件没被替换，holder token 仍是 T
+            → 下次运行算出**同一个**标记名 → 建不上 → LockBusy
+              → 每天如此，**永远**
+
+    而当时的 `_sweep_steal_markers()` 只在**抢到标记之后**的 finally 里跑，
+    正好够不着自己造成的这个死锁。实测三次调用三次 LockBusy。
+
+    表现是「每天静默跳过」—— 和「每天没有要催的」长得一模一样，
+    这正是整个项目从头到尾在防的那种失败。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    if _create_lock_exclusive(marker, payload):
+        return
+
+    # 建不上。是别人正在抢（该让路），还是上次抢锁的进程死在半路了（该清理）？
+    # 用 mtime 分辨 —— 这是标记留在盘上的时长。
+    try:
+        age = datetime.now().timestamp() - marker.stat().st_mtime
+    except OSError:
+        # stat 失败说明标记刚被别人清掉，再试一次
+        if _create_lock_exclusive(marker, payload):
+            return
+        raise LockBusy("另一个进程正在抢这把陈旧锁，本次让路")
+
+    if age < STEAL_MARKER_STALE_SECONDS:
+        raise LockBusy("另一个进程正在抢这把陈旧锁，本次让路")
+
+    # 残留。清掉后**只重试一次** —— 再失败说明有别的进程刚抢先建上了，
+    # 那是正常竞争，让路即可，不能在这里循环等待。
+    try:
+        marker.unlink()
+    except OSError:
+        pass
+    if _create_lock_exclusive(marker, payload):
+        return
+    raise LockBusy("另一个进程正在抢这把陈旧锁，本次让路")
 
 
 def acquire_lock() -> tuple[Path, str, str | None]:
@@ -478,6 +540,12 @@ def acquire_lock() -> tuple[Path, str, str | None]:
     if _block("acquire_lock"):
         raise LedgerError("只读模式不该加锁 —— 调用方应先判断 real_run")
     state_dir().mkdir(parents=True, exist_ok=True)
+
+    # 🔴 先扫一遍残留标记，**无论后面走哪条路**。
+    #    旧实现把它放在抢锁成功后的 finally 里，于是「标记残留把自己堵死」
+    #    这个场景永远等不到清理 —— 清理代码在死锁的另一侧。
+    _sweep_steal_markers()
+
     p = _state_path(LOCK_FILE)
     token = uuid.uuid4().hex
     payload = json.dumps(
@@ -485,10 +553,45 @@ def acquire_lock() -> tuple[Path, str, str | None]:
         ensure_ascii=False,
     )
 
-    if _create_lock_exclusive(p, payload):
-        return p, token, None
+    # ── 抢锁：O_EXCL 拿不到就看看是谁占着 ──
+    #
+    # 🔴 这个循环不是为了「多试几次碰运气」，是补一个真实的竞态窗口：
+    #    O_EXCL 失败之后、_read_lock 之前，持锁者可能已经释放。那时
+    #    holder 是空的 → token 是 None → 走到下面的夺锁路径时，
+    #    「锁的 token 有没有变」这个校验会拿 None 和 None 比，**必然相等**，
+    #    于是两个进程双双通过校验、双双 os.replace，**同时拿到锁**。
+    #
+    #    实测抓到过：四进程 15 轮里的第 11 轮出现 2 个 ok
+    #    （在装出来的副本里跑、机器负载高的时候才够宽）。
+    #    锁不存在时正确的动作是**重新走一次 O_EXCL**，而不是去夺一把
+    #    根本不存在的锁。
+    holder: dict = {}
+    holder_raw = b""
+    for _ in range(3):
+        if _create_lock_exclusive(p, payload):
+            return p, token, None
+        try:
+            holder_raw = p.read_bytes()
+        except OSError:
+            # 锁刚被释放，文件已经没了 —— 重新竞争，不走夺锁路径
+            continue
+        if not holder_raw.strip():
+            # 🔴 空文件 = 创建者正处在「已建文件、还没写完」的中间态。
+            #    _create_lock_exclusive 是 os.open(O_EXCL) 之后才 os.write，
+            #    这两个系统调用之间文件是 0 字节的。
+            #
+            #    空内容 parse 出来是 {}，和「锁文件损坏」长得一模一样，
+            #    于是会被当成陈旧锁夺走 —— 而那把锁的主人正在写它。
+            #    结果：创建者以为自己持锁（它的 fd 指向已被替换掉的 inode），
+            #    夺锁者也以为自己持锁，**两个进程同时在跑**。
+            #
+            #    合法的废弃锁一定有内容，所以空文件只可能是这个中间态：让路。
+            raise LockBusy("另一个进程正在创建运行锁，本次让路")
+        holder = _read_lock(p)
+        break
+    else:
+        raise LockBusy("运行锁反复在竞争中变动，本次让路")
 
-    holder = _read_lock(p)
     pid = holder.get("pid")
     started = parse_dt(holder.get("started_at"))
     alive = _pid_alive(pid) if isinstance(pid, int) else False
@@ -530,12 +633,20 @@ def acquire_lock() -> tuple[Path, str, str | None]:
     # O_EXCL 标记文件，谁建成谁才有权替换。抢同一把锁的进程争同一个标记，
     # 而抢占成功后锁的 token 就变了 —— 残留的旧标记再没人会去看，
     # 顶多是垃圾文件（下面顺手清），不会把谁挡死。
+    #
+    # ⚠️ 标记残留会永久堵死运行，清理逻辑见 _claim_steal_right()。
     marker = _state_path(f"{LOCK_FILE}.steal.{holder.get('token') or 'unknown'}")
-    if not _create_lock_exclusive(marker, payload):
-        raise LockBusy("另一个进程正在抢这把陈旧锁，本次让路")
+    _claim_steal_right(marker, payload)
     try:
-        # 拿到抢占权后再确认一次：锁可能在这几行之间已经被换掉了
-        if _read_lock(p).get("token") != holder.get("token"):
+        # 拿到抢占权后再确认一次：锁可能在这几行之间已经被换掉了。
+        #
+        # 🔴 第二道保险：比**原始内容**，不比 token。
+        #
+        #    比 token 有两个洞：①锁文件损坏时根本没有 token（而损坏的锁
+        #    本来就该夺回）；②两边都是 None 时 `!=` 判成相等 —— 那正是
+        #    「锁已被释放」那个竞态能同时放两个进程进来的原因。
+        #    比字节则两种情况都对：文件没了会抛 OSError，内容变了不相等。
+        if p.read_bytes() != holder_raw:
             raise LockBusy("这把陈旧锁刚被另一个进程接管，本次让路")
         tmp = _state_path(f"{LOCK_FILE}.new.{token}")
         tmp.write_text(payload, encoding="utf-8")
@@ -554,11 +665,20 @@ def acquire_lock() -> tuple[Path, str, str | None]:
 
 
 def _sweep_steal_markers() -> None:
-    """清掉残留的抢占标记。它们不挡人，只是垃圾 —— 但垃圾也会攒。"""
+    """
+    清掉残留的抢占标记。
+
+    🔴 「它们不挡人，只是垃圾」—— 这是 0.3.0-rc1 注释里的原话，**是错的**。
+       同一把陈旧锁算出的标记名是固定的（以 holder token 命名），
+       残留标记会让下一次抢占永远建不上 → 永久 LockBusy。它挡人，而且挡死。
+
+    所以这个函数现在在 acquire_lock() **入口**跑，不再是收尾清垃圾。
+    """
     try:
         for f in state_dir().glob(f"{LOCK_FILE}.steal.*"):
             try:
-                if (datetime.now().timestamp() - f.stat().st_mtime) > 300:
+                if (datetime.now().timestamp() - f.stat().st_mtime
+                        > STEAL_MARKER_STALE_SECONDS):
                     f.unlink()
             except OSError:
                 pass

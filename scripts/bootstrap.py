@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -35,10 +36,74 @@ def should_ignore(_directory: str, names: Iterable[str]) -> set[str]:
     return {name for name in names if _manifest.should_skip(name)}
 
 
-def copy_package(source: Path, destination: Path) -> None:
-    """只覆盖包内代码，不删除目标目录中的任何文件。"""
+def retire_stale_code(source: Path, destination: Path) -> list[str]:
+    """
+    把上一版有、这一版没有的文件挪出执行路径，返回被挪走的相对路径。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 0.3.0-rc1 的 copy_package 是**纯合并**（docstring 原文：
+       「不删除目标目录中的任何文件」）。于是升级后：
+
+         上一版的 scripts/old_module.py 还躺在 scripts/ 里
+           → 仍然 import 得到、仍然跑得起来
+             → `unittest discover -s tests` 还会跑上一版的测试
+
+       两个版本的代码混在同一个目录里执行，出了问题连是哪一版都说不清。
+
+    ⚠️ 挪走而不是删除：
+       ① 用户的一贯要求是「不删除文件，只新增」；
+       ② 升级出问题时还能翻回来看上一版到底是什么样。
+
+    去处是 `.upgrade-backup-<时间戳>/`：以 `.` 开头、且不在 _manifest 清单里，
+    import 和 unittest discover 都够不着 —— **失效但没销毁**。
+
+    🔴 范围严格限定在清单内（docs/ scripts/ templates/ tests/ 与那几个顶层
+       文件）。运行时数据（followup/ state/ runtime/ .env）、以及清单之外的
+       任何东西（生产目录里的 notes/、CHANGELOG.md）**一律不碰**。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    retired: list[str] = []
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = destination / f".upgrade-backup-{stamp}"
+
+    def move(item: Path, rel: str) -> None:
+        target = backup / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(item), str(target))
+        retired.append(rel)
+
+    for name in PACKAGE_DIRS:
+        dst_dir = destination / name
+        src_dir = source / name
+        if not dst_dir.is_dir():
+            continue
+        for item in sorted(dst_dir.rglob("*"), key=lambda p: -len(p.parts)):
+            rel_in_dir = item.relative_to(dst_dir)
+            rel = f"{name}/{rel_in_dir.as_posix()}"
+
+            # __pycache__ 一律挪走：里面的 .pyc 对应的是上一版的源码。
+            if item.is_dir() and item.name == "__pycache__":
+                move(item, rel)
+                continue
+            if item.is_dir():
+                continue
+            # 运行时数据与本来就不该进包的东西，不属于我们管的范围
+            if any(_manifest.should_skip(part) for part in rel_in_dir.parts):
+                continue
+            if not (src_dir / rel_in_dir).exists():
+                move(item, rel)
+
+    return retired
+
+
+def copy_package(source: Path, destination: Path) -> list[str]:
+    """
+    把包内代码覆盖过去，并把上一版残留的代码挪出执行路径。
+
+    返回被挪走的相对路径列表（正常首次安装为空）。
+    """
     if source.resolve() == destination.resolve():
-        return
+        return []
 
     try:
         destination.mkdir(parents=True, exist_ok=True)
@@ -56,6 +121,8 @@ def copy_package(source: Path, destination: Path) -> None:
                     copy_function=shutil.copy2,
                     ignore=should_ignore,
                 )
+        # 🔴 必须在复制**之后**：先复制新版，再拿新版当基准清点残留。
+        return retire_stale_code(source, destination)
     except OSError as exc:
         raise BootstrapError(
             f"无法把程序安装到 {destination}：{exc}"
@@ -90,6 +157,18 @@ def run_setup(skill_dir: Path, runtime_home: Path, hermes: bool = False) -> None
         )
 
 
+def _report_retired(retired: list[str]) -> None:
+    """升级挪走了旧代码就说一声。悄悄搬走和悄悄留下同样不该。"""
+    if not retired:
+        return
+    print(f"ℹ️ 升级：{len(retired)} 个上一版残留的文件已移出执行路径"
+          f"（挪到 .upgrade-backup-*/，未删除）：")
+    for rel in retired[:10]:
+        print(f"   · {rel}")
+    if len(retired) > 10:
+        print(f"   · …另有 {len(retired) - 10} 个")
+
+
 def install_workbuddy(source: Path, workspace: Path) -> tuple[Path, Path]:
     try:
         workspace.mkdir(parents=True, exist_ok=True)
@@ -100,7 +179,8 @@ def install_workbuddy(source: Path, workspace: Path) -> tuple[Path, Path]:
     runtime_home = workspace / "runtime"
     if skill_dir.is_symlink() or runtime_home.is_symlink():
         raise BootstrapError("程序目录和运行目录不能是符号链接")
-    copy_package(source, skill_dir)
+    retired = copy_package(source, skill_dir)
+    _report_retired(retired)
     run_setup(skill_dir, runtime_home)
     return skill_dir, runtime_home
 
@@ -137,7 +217,8 @@ def install_hermes(source: Path, home: Path) -> tuple[Path, Path]:
     skill_dir = home / "skills" / "work" / "followup-genie"
     if skill_dir.is_symlink() or home.is_symlink():
         raise BootstrapError("Hermes 目录和 Skill 目录不能是符号链接")
-    copy_package(source, skill_dir)
+    retired = copy_package(source, skill_dir)
+    _report_retired(retired)
     run_setup(skill_dir, home, hermes=True)
     return skill_dir, home
 

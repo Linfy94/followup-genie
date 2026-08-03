@@ -6,7 +6,7 @@
 
 ---
 
-> `0.3.0-rc1` 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍需业务电脑验证。
+> `0.3.0-rc2` 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍需业务电脑验证。
 
 业务不需要懂 Git、代码或命令行，也不需要阅读本文件。
 
@@ -183,7 +183,9 @@ python3 scripts/check_followup.py --dry-run --verify-readonly
 
 - WorkBuddy 客户端的包导入、无人值守权限、休眠补跑和升级保留状态仍需实机验证。
 - Windows 尚未验证。
-- 主任务没有独立看门狗；电脑休眠或定时任务未启动时，主任务自身无法告警。
+- 独立看门狗已交付（`scripts/watchdog.py`，装在运行时目录、与 Skill 解耦），
+  但**要人实际装上 launchd 并跑过一次 `--self-test` 才算闭环**。没装之前，
+  电脑休眠或定时任务未启动时，主任务自身仍无法告警。
 - 当前只支持腾讯文档台账，不包含微信聊天记录自动更新台账。
 
 ## 开发验证
@@ -194,4 +196,4 @@ python3 scripts/check_followup.py --dry-run --verify-readonly
 ./run_tests.sh
 ```
 
-当前发布版本：`0.3.0-rc1`。真实凭证、业务配置、客户数据和状态不得进入仓库。
+当前发布版本：`0.3.0-rc2`。真实凭证、业务配置、客户数据和状态不得进入仓库。

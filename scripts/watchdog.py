@@ -97,19 +97,103 @@ def read_env(key: str) -> str | None:
     return None
 
 
-def load_config() -> dict:
+# 每个字段的类型与取值范围。
+#
+# 🔴 0.3.0-rc1 只在使用点写 `int(cfg.get("schedule_hour") or 9)` ——
+#    配置写成 "九" 直接 ValueError 裸崩；写成 25 更隐蔽，
+#    要等到 `time(25, 0)` 那一行才炸。监控器崩掉 = 完全没有监控，
+#    而崩的原因还是一个手滑打错的数字。
+#
+# 校验策略：**坏值退回默认值 + 收一条人话警告，绝不罢工。**
+# 监控器因为配置坏了而不跑，正是最不该发生的事 —— 它存在的意义
+# 就是在别的东西都坏了的时候还能吭一声。
+SPEC = {
+    "enabled":                    ("bool", None, None),
+    "schedule_hour":              ("int", 0, 23),
+    "count_weekends":             ("bool", None, None),
+    "missed_runs_before_alert":   ("int", 1, 1000),
+    "absolute_max_hours":         ("number", 1, 24 * 365),
+    "repeat_alert_hours":         ("number", 0, 24 * 365),
+    "missing_health_grace_hours": ("number", 0, 24 * 365),
+}
+
+
+def validate_config(seg) -> tuple[dict, list[str]]:
+    """
+    校验 watchdog 配置段，返回 `(可用的配置, 人话警告列表)`。
+
+    整段不是对象、字段类型不对、数值越界 —— 一律退回默认值并说清楚
+    哪个字段、写的是什么、为什么不行、现在按什么值跑。
+    """
     cfg = dict(DEFAULTS)
+    warnings: list[str] = []
+
+    if seg is None:
+        return cfg, warnings
+    if not isinstance(seg, dict):
+        return cfg, [f"output.json 里的 watchdog 应该是一个对象 {{...}}，"
+                     f"实际是 {type(seg).__name__} —— 整段忽略，全部按默认值跑"]
+
+    for key, value in seg.items():
+        if key.startswith("_"):        # 下划线开头是注释，本来就不是配置
+            continue
+        if key not in SPEC:
+            warnings.append(f"watchdog.{key} 不是可识别的配置项，已忽略")
+            continue
+
+        kind, low, high = SPEC[key]
+        default = DEFAULTS[key]
+
+        if kind == "bool":
+            # 🔴 不用 bool(value)：那样 "false" 这个字符串会变成 True，
+            #    配置写错反而更危险 —— 关掉监控和打开监控是反的。
+            if not isinstance(value, bool):
+                warnings.append(
+                    f"watchdog.{key} 应该是 true 或 false，"
+                    f"实际是 {value!r} —— 按默认值 {default} 跑")
+                continue
+            cfg[key] = value
+            continue
+
+        # 数值。bool 是 int 的子类，得先排掉，否则 true 会被当成 1。
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            warnings.append(
+                f"watchdog.{key} 应该是数字，实际是 {value!r} —— "
+                f"按默认值 {default} 跑")
+            continue
+        if kind == "int" and not float(value).is_integer():
+            warnings.append(
+                f"watchdog.{key} 应该是整数，实际是 {value!r} —— "
+                f"按默认值 {default} 跑")
+            continue
+        if not (low <= value <= high):
+            warnings.append(
+                f"watchdog.{key} 应该在 {low}–{high} 之间，实际是 {value!r} —— "
+                f"按默认值 {default} 跑")
+            continue
+
+        cfg[key] = int(value) if kind == "int" else value
+
+    return cfg, warnings
+
+
+def load_config() -> tuple[dict, list[str]]:
+    """读并校验配置。返回 `(配置, 警告列表)`。"""
     p = runtime_home() / "followup" / "config" / "output.json"
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        seg = data.get("watchdog")
-        if isinstance(seg, dict):
-            cfg.update({k: v for k, v in seg.items() if not k.startswith("_")})
-    except Exception:  # noqa: BLE001
-        # 配置读不出来就用默认值继续。
-        # 监控器因为配置坏了而罢工，正好是最不该发生的事。
-        pass
-    return cfg
+        raw = p.read_text(encoding="utf-8")
+    except OSError:
+        # 配置不存在或读不了就用默认值继续 —— 见 SPEC 上方的说明。
+        return dict(DEFAULTS), []
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        return dict(DEFAULTS), [f"output.json 不是合法 JSON（{e}）—— 全部按默认值跑"]
+    if not isinstance(data, dict):
+        return dict(DEFAULTS), [
+            f"output.json 的顶层应该是一个对象 {{...}}，"
+            f"实际是 {type(data).__name__} —— 全部按默认值跑"]
+    return validate_config(data.get("watchdog"))
 
 
 def parse_dt(s) -> datetime | None:
@@ -155,15 +239,17 @@ def judge(health: dict, wd_state: dict, cfg: dict,
     去重键让「同一个故障」在 repeat_alert_hours 内只响一次 ——
     一天查两次却报两次，人两天就把它静音了。
     """
-    hour = int(cfg.get("schedule_hour") or 9)
-    weekends = bool(cfg.get("count_weekends"))
-    need = int(cfg.get("missed_runs_before_alert") or 2)
-    max_h = int(cfg.get("absolute_max_hours") or 168)
+    # cfg 已经过 validate_config()，这里不再做类型转换 ——
+    # 在使用点 int() 正是 0.3.0-rc1 裸崩的地方（"九" → ValueError）。
+    hour = cfg["schedule_hour"]
+    weekends = cfg["count_weekends"]
+    need = cfg["missed_runs_before_alert"]
+    max_h = cfg["absolute_max_hours"]
 
     if not health:
         first_seen = parse_dt(wd_state.get("first_seen_missing")) or now
         hours = (now - first_seen).total_seconds() / 3600
-        grace = int(cfg.get("missing_health_grace_hours") or 36)
+        grace = cfg["missing_health_grace_hours"]
         if hours < grace:
             return (False, "missing",
                     f"还没有健康记录，已观察 {hours:.1f} 小时"
@@ -242,15 +328,24 @@ def send_alert(text: str, *, log: Path) -> tuple[bool, str]:
                        else "找不到 hermes 可执行文件")
 
     # 二级：本机通知。只有人在电脑前才看得到，所以只能当兜底。
+    #
+    # 🔴 0.3.0-rc1 在这里 `check=False` 之后**无条件 return True**，
+    #    退出码根本没看。而 osascript 失败是常事：launchd 里没有 GUI 会话、
+    #    通知权限被拒、Script Editor 被 MDM 限制 —— 全都返回非零。
+    #    结果是三级降级里的第三级永远走不到，watchdog 报「已告警」并退 0，
+    #    而那条告警**根本没发出去**。
     if sys.platform == "darwin":
         try:
             first = text.splitlines()[0][:120]
-            subprocess.run(
+            r = subprocess.run(
                 ["osascript", "-e",
                  f'display notification {json.dumps(first)} '
                  f'with title {json.dumps(MARK)}'],
-                capture_output=True, timeout=30, check=False)
-            return True, "本机通知（hermes send 失败：" + "；".join(details) + "）"
+                capture_output=True, text=True, timeout=30, check=False)
+            if r.returncode == 0:
+                return True, "本机通知（hermes send 失败：" + "；".join(details) + "）"
+            details.append(f"osascript 退出码 {r.returncode}："
+                           f"{(r.stderr or '').strip()[:200]}")
         except Exception as e:  # noqa: BLE001
             details.append(f"osascript {type(e).__name__}: {e}")
 
@@ -262,6 +357,124 @@ def send_alert(text: str, *, log: Path) -> tuple[bool, str]:
     except OSError:
         pass
     return False, "；".join(details)
+
+
+# ── 自我安装：搬到 skill 之外 ──────────────────────────────────────────
+
+LAUNCHD_LABEL = "com.linfangyu.followup-watchdog"
+
+# 找 Python 的顺序。**不硬编码 /usr/bin/python3** ——
+# 它在精简过的系统、Linux、或者 CommandLineTools 没装时并不存在，
+# 那样 plist 会指向一个不存在的文件，launchd 静默失败，
+# 而「监控器自己没跑」恰恰没有任何人会发现。
+PYTHON_CANDIDATES = ("/usr/bin/python3", "/opt/homebrew/bin/python3",
+                     "/usr/local/bin/python3")
+
+
+def watchdog_dir() -> Path:
+    """
+    监控器的独立安装位置。
+
+    🔴 **必须在 skill 目录之外。** 0.3.0-rc1 把它留在
+       `skills/work/followup-genie/scripts/` 里，于是 skill 被移动、删除、
+       或者 `hermes skills update` 装坏时，plist 指向的文件就没了 ——
+       launchd 静默失败，监控器连同被监控对象一起消失。
+
+       而「skill 坏了」正是它最该报警的场景之一。监控器和被监控对象
+       死在同一个目录里，等于没有监控。
+
+    放运行时目录下：升级不覆盖运行时目录，删 skill 也波及不到它。
+    """
+    return runtime_home() / "watchdog"
+
+
+def find_python() -> str:
+    """
+    找一个能用的 python3。安装时检测，把结果写死进 plist。
+
+    刻意**不用 sys.executable**：装的时候可能是 hermes 的 venv python 在跑，
+    而监控器一旦依赖 hermes 的 venv，hermes 装坏了它就跟着哑 ——
+    正是它要抓的场景。要的是系统自带那个。
+    """
+    for cand in PYTHON_CANDIDATES:
+        p = Path(cand)
+        if p.is_file() and os.access(cand, os.X_OK):
+            return cand
+    found = shutil.which("python3")
+    if found:
+        return found
+    raise RuntimeError(
+        "找不到可用的 python3。试过：" + "、".join(PYTHON_CANDIDATES)
+        + "，以及 PATH。macOS 上通常执行一次 `xcode-select --install` 即可。")
+
+
+def render_plist(python: str, script: Path, home: Path, hour: int) -> str:
+    """生成填好真实路径的 plist —— 不再让人对着「请改成…」手抄。"""
+    hermes_bin = Path.home() / ".local" / "bin"
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 由 `watchdog.py --install` 生成，不要手改；重装会覆盖。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCHD_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python}</string>
+        <string>{script}</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>FOLLOWUP_HOME</key>
+        <string>{home}</string>
+        <key>PATH</key>
+        <string>{hermes_bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- 每天查两次：主任务 {hour}:00 跑，这两个点都在它之后。
+         再加一次开机后触发，覆盖「关机好几天」的情况。 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>{hour + 1}</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>30</integer></dict>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{home}/followup/state/watchdog.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>{home}/followup/state/watchdog.launchd.log</string>
+</dict>
+</plist>
+"""
+
+
+def install(version: str = "") -> tuple[Path, Path, str]:
+    """
+    把监控器复制到 skill 之外，并生成填好路径的 plist。
+
+    **不执行 `launchctl load`** —— 装不装由人决定，这里只把东西放好
+    并打印那几条命令。返回 `(脚本路径, plist 路径, python 路径)`。
+    """
+    python = find_python()
+    home = runtime_home()
+    d = watchdog_dir()
+    d.mkdir(parents=True, exist_ok=True)
+
+    script = d / "watchdog.py"
+    shutil.copyfile(Path(__file__).resolve(), script)
+    os.chmod(script, 0o755)
+
+    (d / "VERSION").write_text(version or "unknown", encoding="utf-8")
+
+    cfg, _ = load_config()
+    plist = d / f"{LAUNCHD_LABEL}.plist"
+    plist.write_text(render_plist(python, script, home, cfg["schedule_hour"]),
+                     encoding="utf-8")
+    return script, plist, python
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────
@@ -279,10 +492,32 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="只打印判定，不发不写")
     ap.add_argument("--self-test", action="store_true",
                     help="强制走一次完整告警链路（会真发消息，用于装机后验证）")
+    ap.add_argument("--install", action="store_true",
+                    help="把监控器装到 skill 之外并生成 plist（不会 launchctl load）")
+    ap.add_argument("--version", default="",
+                    help="配合 --install，记录装的是哪一版")
     args = ap.parse_args(argv)
 
+    if args.install:
+        try:
+            script, plist, python = install(args.version)
+        except (OSError, RuntimeError) as e:
+            print(f"🔴 安装失败：{e}", file=sys.stderr)
+            return 1
+        print(f"✅ 监控器已装到 skill 之外：{script}")
+        print(f"   Python：{python}（安装时检测到的）")
+        print(f"   plist：{plist}")
+        print("\n还差三条命令，需要你自己跑（我不替你动 launchd）：")
+        print(f"  cp {plist} ~/Library/LaunchAgents/")
+        print(f"  launchctl load ~/Library/LaunchAgents/{plist.name}")
+        print(f"  {python} {script} --self-test    # 会真发一条消息，收到才算通")
+        return 0
+
     now = datetime.now().astimezone()
-    cfg = load_config()
+    cfg, cfg_warnings = load_config()
+    for w in cfg_warnings:
+        # 打到 stderr：配置写错要看得见，但不能挡住正常判定输出。
+        print(f"⚠️ 配置有问题：{w}", file=sys.stderr)
     sd = state_dir()
     health = read_json(sd / "health.json")
     wd_path = sd / "watchdog_state.json"
@@ -296,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'✅' if ok else '🔴'} 告警链路自检：{how}")
         return 0 if ok else 1
 
-    if not cfg.get("enabled", True):
+    if not cfg["enabled"]:
         print("⏸ 存活监控在 output.json 里被关闭了（watchdog.enabled=false）")
         return 0
 
@@ -322,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
         same = wd_state.get("last_alert_key") == key
         within = (last_at is not None
                   and (now - last_at).total_seconds() / 3600
-                  < float(cfg.get("repeat_alert_hours") or 24))
+                  < cfg["repeat_alert_hours"])
         if same and within:
             print(f"🔁 同一故障已在 {wd_state.get('last_alert_at')} 告警过，本次不重复")
         else:
@@ -331,10 +566,28 @@ def main(argv: list[str] | None = None) -> int:
                     f"常见原因：电脑长时间关机 / gateway 没起来 / 定时任务被删。\n"
                     f"排查：hermes cron list ｜ launchctl list | grep hermes")
             ok, how = send_alert(text, log=log)
-            new_state["last_alert_at"] = now.isoformat(timespec="seconds")
-            new_state["last_alert_key"] = key
             new_state["last_alert_ok"] = ok
             new_state["last_alert_how"] = how
+
+            if ok:
+                # 🔴 去重键**只在发成功之后才写**。
+                #
+                #    0.3.0-rc1 是无条件写的，后果很难自己发现：
+                #    告警发失败 → 照样记进 24 小时去重 → 下次检查看到
+                #    「同一故障已告警过」→ 跳过 → 再下次还是跳过……
+                #    故障一直在，而告警**永远发不出去**。
+                #
+                #    监控器最不能有的就是这种失败：它自己哑了，还以为自己在响。
+                new_state["last_alert_at"] = now.isoformat(timespec="seconds")
+                new_state["last_alert_key"] = key
+                new_state.pop("alert_failures", None)
+                new_state.pop("last_alert_failed_at", None)
+            else:
+                # 失败只留诊断痕迹，**不进去重判定** —— 下次检查必定重试。
+                new_state["last_alert_failed_at"] = now.isoformat(timespec="seconds")
+                new_state["alert_failures"] = int(
+                    wd_state.get("alert_failures") or 0) + 1
+
             print(f"{'✅ 已告警' if ok else '🔴 告警发不出去'}（{how}）\n{why}")
             if not ok:
                 code = 1

@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `0.3.0-rc1` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
+> `0.3.0-rc2` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
 
 ## 给业务：只复制下面这一段
 
@@ -187,6 +187,7 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --verify-rea
 FOLLOWUP_HOME="<运行时目录>" python3 scripts/doctor.py --validate-config          # 只查配置，不联网
 FOLLOWUP_HOME="<运行时目录>" python3 scripts/doctor.py                            # 全项自检（联网只读台账）
 
+FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --install                # 装到运行时目录并生成 plist
 FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --dry-run                # 存活监控：只打印判定
 FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test              # 验告警链路（**会真发消息**）
 
@@ -194,8 +195,13 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test       
 ```
 
 > `watchdog.py` 由 launchd 定时执行，用来发现「任务根本没跑」——
-> 那是唯一一类连报错都不会产生的失败。**默认没有安装**，装法见
-> [docs/外部监控.md](docs/外部监控.md)。
+> 那是唯一一类连报错都不会产生的失败。
+>
+> `setup.sh` 已经自动把它装到 **`<运行时目录>/watchdog/`**（Skill 之外，
+> 这样 Skill 被移动、删除或升级装坏都影响不到它），并生成了一份路径填好的
+> plist。**但 launchd 还需要你自己装载**，两条命令见
+> [docs/外部监控.md](docs/外部监控.md)——装载并跑过 `--self-test` 之前，
+> 「能发现任务根本没跑」只是能力，不是闭环。
 
 **`--dry-run`、`--json`、`--today`（不带 `--force-push`）一律严格只读**：
 不发企微、不发告警、不创建或修改任何状态文件，连损坏的状态文件都不会被改名。
@@ -266,7 +272,7 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 
 ## 已知边界
 
-见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.3.0-rc1` 的主要限制：
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.3.0-rc2` 的主要限制：
 WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**。
 
 ---

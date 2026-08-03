@@ -1,18 +1,34 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  项目跟进精灵 · 外部存活监控（launchd 模板）
+  项目跟进精灵 · 外部存活监控（launchd 参考模板）
 
-  🛑 这是模板，不是已安装的配置。安装步骤见 docs/外部监控.md。
-     装之前把下面三处 <请改成…> 换成真实路径。
+  ⛔ 0.3.0-rc2 起**不要手抄这份**。执行：
+
+        python3 scripts/watchdog.py --install
+
+     它会把监控器装到 <运行时目录>/watchdog/，并生成一份路径已经填好的
+     plist（Python 路径按安装时实际检测的结果写入）。装/不装 launchd
+     仍然由你决定 —— --install 只把东西放好，不会 launchctl load。
+
+     本文件只留作「plist 长什么样」的参考。手抄容易漏改一处路径，
+     而 launchd 找不到文件时是**静默失败** —— 监控器没跑这件事，
+     恰恰没有任何人会发现。
 
   为什么用 launchd 而不是 hermes cron：
     被监控的正是 hermes 的调度器。gateway 没起来时，
     「检查 gateway 起没起来」的那个任务同样不会执行 —— 循环依赖。
     launchd 是 macOS 自带的，与 Hermes 无关，这才叫外部。
 
-  为什么用 /usr/bin/python3 而不是 hermes 的 venv：
-    同样的道理。hermes 装坏了，监控器不能跟着一起哑掉。
+  为什么不指向 skill 里的 watchdog.py：
+    skill 被移动、删除、升级装坏时，plist 指向的文件就没了 ——
+    监控器跟着被监控对象一起消失，而那正是它最该报警的场景。
+    所以 --install 会把它复制到运行时目录，那里升级不会动。
+
+  为什么不写死 /usr/bin/python3：
+    精简系统、Linux、CommandLineTools 没装的机器上它并不存在，
+    plist 会指向一个不存在的文件。--install 因此在安装时检测。
+    也不能用 hermes 的 venv python —— hermes 装坏了监控器不能跟着哑。
     watchdog.py 只用标准库，系统自带的 3.9 就够。
 -->
 <plist version="1.0">
