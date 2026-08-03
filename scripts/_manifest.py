@@ -70,6 +70,22 @@ EXCLUDED_SUFFIXES = (".pyc", ".pyo", ".log")
 EXCLUDED_SCRIPT_NAMES = frozenset({"build_release.py"})
 
 
+# 会写「当前版本是 x.y.z」的交付文件。打包时逐个核对必须与 VERSION 一致。
+#
+# 🔴 为什么要有这份清单：0.3.0-rc1 发布后，这两份 docs 里仍写着 `0.2.0-rc2`，
+#    而当时的守卫只查 README 与 SKILL.md，一路放行。业务打开手册看到的
+#    是上一版的版本号 —— 版本号写错不会让程序崩，只会让人对不上账。
+#
+# KNOWN_ISSUES.md 刻意不在此列：它的「已在 0.2.0 系列修复」是**历史引用**，
+# 本来就该保留旧版本号。
+VERSION_STAMPED_FILES = (
+    "README.md",
+    "SKILL.md",
+    "docs/WorkBuddy代理指令.md",
+    "docs/业务操作手册-零基础版.md",
+)
+
+
 def should_skip(name: str) -> bool:
     """一个文件/目录名要不要跳过。打包与安装共用同一判断。"""
     return (

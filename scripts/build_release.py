@@ -114,10 +114,15 @@ def validate_contents(files: list[Path], release_version: str) -> None:
             if pattern.search(data):
                 raise BuildError(f"疑似敏感内容，停止打包：{relative}")
 
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-    if release_version not in readme or release_version not in skill:
-        raise BuildError("README.md、SKILL.md 与 VERSION 的版本号不一致")
+    stale = []
+    for name in _manifest.VERSION_STAMPED_FILES:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        if release_version not in text:
+            stale.append(name)
+    if stale:
+        raise BuildError(
+            f"以下文件写的版本号与 VERSION（{release_version}）不一致："
+            + "、".join(stale))
 
 
 def zip_mode(path: Path) -> int:

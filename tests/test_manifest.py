@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,41 @@ class ManifestIsCoherentTest(unittest.TestCase):
 
     def test_dev_only_scripts_stay_home(self):
         self.assertIn("build_release.py", _manifest.EXCLUDED_SCRIPT_NAMES)
+
+
+class VersionStampTest(unittest.TestCase):
+    """
+    交付文件里写的版本号必须与 VERSION 一致。
+
+    🔴 这条是 0.3.0-rc1 之后补的：发版时 VERSION、README、SKILL.md 都改了，
+       但 docs/ 下两份给业务看的文档仍写着 `0.2.0-rc2`，而当时的守卫只查
+       README 与 SKILL.md，于是一路放行推上了 GitHub。
+    """
+
+    def setUp(self):
+        self.version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+
+    def test_stamped_files_exist_and_match_version(self):
+        for name in _manifest.VERSION_STAMPED_FILES:
+            path = ROOT / name
+            self.assertTrue(path.is_file(), f"清单里的 {name} 不存在")
+            self.assertIn(self.version, path.read_text(encoding="utf-8"),
+                          f"{name} 里没写当前版本 {self.version}")
+
+    def test_stamped_files_carry_no_other_version(self):
+        """写了当前版本还不够 —— 旧版本号残留同样会让人对不上账。"""
+        pattern = re.compile(r"\b\d+\.\d+\.\d+(?:-rc\d+)?\b")
+        for name in _manifest.VERSION_STAMPED_FILES:
+            text = (ROOT / name).read_text(encoding="utf-8")
+            others = {m for m in pattern.findall(text) if m != self.version}
+            self.assertEqual(others, set(),
+                             f"{name} 里还留着别的版本号：{sorted(others)}")
+
+    def test_build_release_guard_covers_these_files(self):
+        """守卫读的必须是这份清单，不能又在别处硬编码一份。"""
+        self.assertIs(
+            _manifest.VERSION_STAMPED_FILES,
+            build_release._manifest.VERSION_STAMPED_FILES)
 
 
 # 🔴 防递归。
