@@ -96,10 +96,57 @@ class HolidayTableDegradeTest(unittest.TestCase):
             self.assertTrue(r.alerted)
 
     def test_weekend_only_mode_is_not_a_warning(self):
-        """明确配置成「只排周末」是合法选择，不该报警。"""
+        """明确配置成「只排周末」是合法选择，不该报警 —— **前提是没人依赖它**。"""
         c = core.WorkdayCalc({"exclude_weekends": True,
                               "exclude_holidays": False}, None)
         self.assertIsNone(c.holiday_warning)
+
+    def test_weekend_only_mode_warns_when_a_node_repeats_by_workdays(self):
+        """
+        🔴 装机时最容易漏的一步：模板的 exclude_holidays 默认 false、
+           holidays.json 默认是空的，漏拷之后**原本一句提示都没有**。
+
+        而只要有节点按「每 N 个工作日」复提醒，业务读到的口径就和实际
+        算的对不上 —— 国庆连休会被整段算成工作日。这必须说话。
+        """
+        c = core.WorkdayCalc({"exclude_weekends": True,
+                              "exclude_holidays": False}, None,
+                             ["待专家评估"])
+        self.assertIsNotNone(c.holiday_warning)
+        self.assertIn("待专家评估", c.holiday_warning)
+        self.assertIn("exclude_holidays", c.holiday_warning)
+
+
+class NodesUsingWorkdaysTest(unittest.TestCase):
+    """doctor 与每日运行共用同一份「谁按工作日复提醒」的判断。"""
+
+    @staticmethod
+    def _rules(nodes):
+        return {"rulesets": {"box": {"nodes": nodes}}}
+
+    def test_picks_up_nodes_whose_repeat_is_in_workdays(self):
+        r = self._rules([
+            {"stage": "待收资", "repeat": {"days": 7}},
+            {"stage": "待专家评估", "repeat": {"workdays": 2}},
+        ])
+        self.assertEqual(core.nodes_using_workdays(r), ["待专家评估"])
+
+    def test_disabled_nodes_do_not_count(self):
+        """禁用的节点不跑，不该因为它逼人去维护节假日表。"""
+        r = self._rules([{"stage": "汇报", "enabled": False,
+                          "repeat": {"workdays": 2}}])
+        self.assertEqual(core.nodes_using_workdays(r), [])
+
+    def test_all_natural_days_means_no_holiday_table_needed(self):
+        r = self._rules([{"stage": "待收资", "repeat": {"days": 7}}])
+        self.assertEqual(core.nodes_using_workdays(r), [])
+
+    def test_survives_a_malformed_rules_file(self):
+        """配置写坏时这个判断本身不该崩 —— 它跑在故障提示的路径上。"""
+        for bad in ({}, {"rulesets": None}, {"rulesets": {"box": None}},
+                    {"rulesets": {"box": {"nodes": None}}},
+                    {"rulesets": {"box": {"nodes": ["不是对象"]}}}):
+            self.assertEqual(core.nodes_using_workdays(bad), [])
 
 
 class RepeatIntervalTest(unittest.TestCase):

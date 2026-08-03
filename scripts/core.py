@@ -792,6 +792,25 @@ def parse_iso(s: str | None) -> date | None:
 
 # ── 工作日 ────────────────────────────────────────────────────────────
 
+def nodes_using_workdays(rules_cfg: dict) -> list[str]:
+    """
+    哪些节点的复提醒是按工作日算的。
+
+    doctor 与每日运行共用这一份判断 —— 分头各写一遍迟早漂移，
+    而漂移的表现是「doctor 说没问题，实际算错」。
+    """
+    names: list[str] = []
+    for ruleset in (rules_cfg.get("rulesets") or {}).values():
+        if not isinstance(ruleset, dict):
+            continue
+        for node in ruleset.get("nodes") or []:
+            if not isinstance(node, dict) or node.get("enabled") is False:
+                continue
+            if (node.get("repeat") or {}).get("workdays"):
+                names.append(str(node.get("stage") or node.get("name") or node.get("id") or "?"))
+    return names
+
+
 class WorkdayCalc:
     """
     工作日计算。本期只有②专家评估的「每2个工作日」复提醒用到。
@@ -800,7 +819,8 @@ class WorkdayCalc:
     静默降级会让人以为算得准，而实际上国庆期间照常提醒。
     """
 
-    def __init__(self, workday_cfg: dict, holidays_cfg: dict | None):
+    def __init__(self, workday_cfg: dict, holidays_cfg: dict | None,
+                 workday_nodes: "tuple[str, ...] | list[str]" = ()):
         self.exclude_weekends = workday_cfg.get("exclude_weekends", True)
         self.exclude_holidays = workday_cfg.get("exclude_holidays", False)
         self.holidays: set[date] = set()
@@ -808,6 +828,21 @@ class WorkdayCalc:
         self.holiday_warning: str | None = None
 
         if not self.exclude_holidays:
+            # 🔴 关掉节假日本身是合法取舍（见模板注释），但**只有在没人依赖它时**
+            #    才是合法的。一旦真有节点按「每 N 个工作日」复提醒，业务读到的
+            #    「每2个工作日」就和实际算的（只排周末）不是一回事 ——
+            #    国庆连休期间它会照常把假期天数算成工作日。
+            #
+            #    这是装机时最容易漏的一步：模板默认 false、节假日表默认是空的，
+            #    而漏拷之后**原本一句提示都没有**。
+            if workday_nodes:
+                self.holiday_warning = (
+                    f"节点「{'、'.join(workday_nodes)}」按工作日复提醒，"
+                    f"但 rules.json 的 workday.exclude_holidays 是 false —— "
+                    f"实际只排除了周末，法定节假日仍被当作工作日。\n"
+                    f"要么把它改成 true 并补上 config/holidays.json，"
+                    f"要么把这些节点的复提醒改成自然日（days），别让两边对不上。"
+                )
             return
         if not holidays_cfg:
             self.holiday_warning = (

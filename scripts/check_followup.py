@@ -506,7 +506,8 @@ def main(argv: list[str] | None = None) -> int:
 def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
          rules_cfg: dict, active: list, holidays, run_warnings: list[str]) -> int:
     write_on = core.reminders_write_enabled(output_cfg)
-    workday = core.WorkdayCalc(rules_cfg.get("workday") or {}, holidays)
+    workday = core.WorkdayCalc(rules_cfg.get("workday") or {}, holidays,
+                               core.nodes_using_workdays(rules_cfg))
 
     stage_entered = core.read_state("stage_entered.json")
     stage_history = core.read_state("stage_history.json")

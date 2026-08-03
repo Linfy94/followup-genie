@@ -169,19 +169,25 @@ def check_configs(doc: Doc) -> tuple[dict, dict, dict] | None:
     # 节假日表
     hol_path = core.config_dir() / "holidays.json"
     wd_cfg = rules_cfg.get("workday") or {}
+    wd_nodes = core.nodes_using_workdays(rules_cfg)
     if wd_cfg.get("exclude_holidays"):
         try:
             hol = core.load_json(hol_path, "节假日表") if hol_path.exists() else None
         except LedgerError as e:
             doc.add(BAD, "节假日表损坏", f"{e}\n每日运行会以启动阶段故障退出（退出码 2）")
             return ledgers_cfg, rules_cfg, output_cfg
-        wc = core.WorkdayCalc(wd_cfg, hol)
+        wc = core.WorkdayCalc(wd_cfg, hol, wd_nodes)
         if wc.holiday_warning:
             doc.add(WARN, "节假日表需要处理", wc.holiday_warning)
         else:
             doc.add(OK, f"节假日表就绪（{len(wc.holidays)} 个假日）")
+    elif wd_nodes:
+        # 有人依赖工作日口径，却没启用节假日表 —— 装机漏拷 holidays.json
+        # 最典型的表现就是这个，而它原本完全无声。
+        wc = core.WorkdayCalc(wd_cfg, None, wd_nodes)
+        doc.add(WARN, "工作日口径与规则对不上", wc.holiday_warning)
     else:
-        doc.add(OK, "工作日口径：仅排除周末（未启用节假日表）")
+        doc.add(OK, "工作日口径：仅排除周末（没有节点按工作日复提醒，无需节假日表）")
 
     return ledgers_cfg, rules_cfg, output_cfg
 

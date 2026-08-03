@@ -231,6 +231,21 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test       
 ⚠️ `holidays.json` 是全项目唯一需要人工年度维护的东西（国务院调休无法用规则推算）。
 过期时 `doctor` 会报警，**不会静默降级**。
 
+🔴 **装机时它是空的。** 配置不随包分发（升级不覆盖是同一个设计的两面），
+所以 `setup.sh` 复制过去的是空模板：`holidays: []`、`workdays: []`、
+`covers_year: 0`、`verified: false`，且 `rules.json` 的
+`workday.exclude_holidays` 默认为 `false`。
+
+**只有当某个节点的复提醒写成 `{"workdays": N}` 时才需要管它。** 那时要做两件事：
+
+1. 照国务院当年的《部分节假日安排的通知》填 `holidays.json`（放假日与补班日都要，
+   补班日最容易漏），填完把 `verified` 改成 `true`、`covers_year` 填当年
+2. 把 `rules.json` 的 `workday.exclude_holidays` 改成 `true`
+
+两件事漏任何一件，`doctor` 都会报「工作日口径与规则对不上」并说清是哪个节点——
+**不会静默按只排周末算**。如果全部节点都是自然日（`{"days": N}`），
+保持现状即可，`doctor` 会显示「无需节假日表」。
+
 ---
 
 ## 验收顺序
