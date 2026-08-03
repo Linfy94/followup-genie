@@ -44,6 +44,7 @@ from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
 import argparse
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -427,45 +428,24 @@ def render_plist(python: str, script: Path, home: Path, hour: int) -> str:
        tests/test_watchdog_install.py 里有两条测试钉着这件事。
     """
     hermes_bin = Path.home() / ".local" / "bin"
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- 由 watchdog.py 的 install 子命令生成，不要手改；重装会覆盖。 -->
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{LAUNCHD_LABEL}</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>{python}</string>
-        <string>{script}</string>
-    </array>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>FOLLOWUP_HOME</key>
-        <string>{home}</string>
-        <key>PATH</key>
-        <string>{hermes_bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-
-    <!-- 每天查两次：主任务 {hour}:00 跑，这两个点都在它之后。
-         再加一次开机后触发，覆盖「关机好几天」的情况。 -->
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Hour</key><integer>{hour + 1}</integer><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>30</integer></dict>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-
-    <key>StandardOutPath</key>
-    <string>{home}/followup/state/watchdog.launchd.log</string>
-    <key>StandardErrorPath</key>
-    <string>{home}/followup/state/watchdog.launchd.log</string>
-</dict>
-</plist>
-"""
+    log = home / "followup" / "state" / "watchdog.launchd.log"
+    data = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": [python, str(script)],
+        "EnvironmentVariables": {
+            "FOLLOWUP_HOME": str(home),
+            "PATH": (f"{hermes_bin}:/opt/homebrew/bin:/usr/local/bin:"
+                     "/usr/bin:/bin:/usr/sbin:/sbin"),
+        },
+        "StartCalendarInterval": [
+            {"Hour": (hour + 1) % 24, "Minute": 30},
+            {"Hour": (hour + 6) % 24, "Minute": 30},
+        ],
+        "RunAtLoad": True,
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+    }
+    return plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
 
 
 def install(version: str = "") -> tuple[Path, Path, str]:

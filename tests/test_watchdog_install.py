@@ -198,9 +198,11 @@ class PlistContentTest(unittest.TestCase):
                              "🔴 plist 还指着 skill 里那份")
 
     def test_uses_the_detected_python(self):
+        import plistlib
         with temp_home() as home:
             text, python = self._plist(home)
-            self.assertIn(f"<string>{python}</string>", text)
+            data = plistlib.loads(text.encode("utf-8"))
+            self.assertEqual(data["ProgramArguments"][0], python)
 
     def test_has_no_placeholders_left(self):
         """模板时代要人手抄「请改成…」，抄错了 launchd 静默失败。"""
@@ -211,16 +213,44 @@ class PlistContentTest(unittest.TestCase):
 
     def test_carries_the_right_runtime_home(self):
         """指错运行目录的话，监控器看的不是主任务写的那个 health.json。"""
+        import plistlib
         with temp_home() as home:
             text, _ = self._plist(home)
-            self.assertIn(f"<key>FOLLOWUP_HOME</key>\n        <string>{home}</string>",
-                          text)
+            data = plistlib.loads(text.encode("utf-8"))
+            self.assertEqual(data["EnvironmentVariables"]["FOLLOWUP_HOME"], str(home))
 
     def test_check_times_follow_the_configured_hour(self):
+        import plistlib
         from harness import output_cfg
         with temp_home(output=output_cfg(watchdog={"schedule_hour": 7})) as home:
             text, _ = self._plist(home)
-            self.assertIn("<integer>8</integer>", text, "应在主任务之后一小时查")
+            data = plistlib.loads(text.encode("utf-8"))
+            hours = [item["Hour"] for item in data["StartCalendarInterval"]]
+            self.assertEqual(hours, [8, 13], "两次检查都应排在主任务之后")
+
+    def test_special_characters_in_paths_are_valid_xml(self):
+        """路径来自用户目录，&、<、中文都必须作为值转义，不能拼坏 XML。"""
+        import plistlib
+        home = Path("/tmp/业务 & <测试>")
+        script = home / "watchdog" / "监控 & <脚本>.py"
+
+        raw = watchdog.render_plist(
+            "/路径/含 & <符号>/python3", script, home, 9).encode("utf-8")
+        data = plistlib.loads(raw)
+
+        self.assertEqual(data["ProgramArguments"][0], "/路径/含 & <符号>/python3")
+        self.assertEqual(data["ProgramArguments"][1], str(script))
+        self.assertEqual(data["EnvironmentVariables"]["FOLLOWUP_HOME"], str(home))
+
+    def test_late_schedule_wraps_to_valid_launchd_hours(self):
+        """23 点主任务的一小时后是次日 0 点，不能生成非法的 Hour=24。"""
+        import plistlib
+        data = plistlib.loads(watchdog.render_plist(
+            "/usr/bin/python3", Path("/tmp/watchdog.py"), Path("/tmp/home"), 23
+        ).encode("utf-8"))
+        hours = [item["Hour"] for item in data["StartCalendarInterval"]]
+        self.assertEqual(hours, [0, 5])
+        self.assertTrue(all(0 <= hour <= 23 for hour in hours))
 
 
 class SurvivesSkillDeletionTest(unittest.TestCase):
