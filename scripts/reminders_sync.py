@@ -26,7 +26,7 @@ from datetime import date, timedelta
 
 import core
 
-MARKER = "跟进精灵"  # 写进提醒备注，用于下次运行时认回自己创建的提醒
+MARKER = "⭕️"  # 标题前缀，用于一眼认出这条提醒是精灵建的
 
 
 class WriteBlocked(Exception):
@@ -81,33 +81,36 @@ def _esc(s: str) -> str:
 
 def _title(item) -> str:
     """
-    提醒事项的标题。
+    提醒事项的标题。业务 2026-08-03 定的模板：
 
-    🔴 这里必须是完整自包含的句子，与 telegram 清单的措辞不同——
-    telegram 里有「业务线」「阶段」两级标题做上下文，条目可以简写；
-    而提醒事项是**一条一条独立弹出**的，业务看到时没有任何上下文，
-    标题不自己说清楚"谁的什么项目卡在哪一步多久了"就看不懂。
+        ⭕️AI节能盒子「节能测试」深业集团有限公司
+
+    它必须自包含（业务线 + 阶段 + 企业名），与企微清单的条目措辞不同 ——
+    清单里有「业务线」「阶段」两级标题做上下文，条目可以只写企业名；
+    而提醒事项是**一条一条独立弹出**的，看到时没有任何上下文。
+
+    🔴 **标题里绝不能出现天数。** 它是 `_upsert()` 认回旧提醒的唯一匹配键
+    （AppleScript 里 `if name of r is "<标题>"`）。天数每天都在涨，
+    一旦写进标题，第二天就匹配不上 → **给同一个项目再建一条新提醒**。
+    28 条 × 每天，两周后这个列表就没法用了。
+    天数放备注，每天刷新的是备注，标题保持不变。
     """
-    return (
-        f"{item.name}的{item.line_label}项目，"
-        f"已在「{item.stage}」阶段超期{item.overdue_days}天"
-    )
+    return f"{MARKER}{item.line_label}「{item.stage}」{item.name}"
 
 
-def _body(item, today: date) -> str:
-    # 备注里**两个天数都留**：标题只能放一个数，而排查时真正要看的是
-    # 「它在这个节点待了多久、允许多久、起点是哪天、起点怎么来的」。
-    # 备注是她自己查细节的地方，信息多不碍事 —— 与清单要「减少信息长度」不矛盾。
-    bits = [
-        f"{MARKER} · {item.line}",
-        f"超期 {item.overdue_days} 天"
-        f"（在本节点 {item.stalled_days} 天，允许 {item.allowance} 天）",
-        f"起点 {item.clock_from.isoformat()}，来源：{item.clock_source}",
-    ]
+def _body(item) -> str:
+    """
+    备注。业务要求「不要太长」，所以严格只有两行：
+
+        超期 158 天
+        该做什么：催节能测试出报告
+
+    天数写在这里而不是标题里，见 `_title()` 的说明 ——
+    这一行每天被刷新，标题则保持不变，`_upsert` 才认得回来。
+    """
+    bits = [f"超期 {item.overdue_days} 天"]
     if item.action:
         bits.append(f"该做什么：{item.action}")
-    bits.append(f"台账序号：{item.key}")
-    bits.append(f"生成于 {today.isoformat()}")
     return "\n".join(bits)
 
 
@@ -198,7 +201,7 @@ def sync(items: list, output_cfg: dict, today: date, stream=None) -> None:
     created = updated = failed = 0
     for it in items:
         try:
-            r = _upsert(list_name, _title(it), _body(it, today), today, write_enabled=True)
+            r = _upsert(list_name, _title(it), _body(it), today, write_enabled=True)
             if r == "created":
                 created += 1
             else:
