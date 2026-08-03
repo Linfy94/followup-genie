@@ -12,6 +12,17 @@
       "并把下面的 wecom_webhook.enabled 改成 true，两处必须同时改。",
       "🔴 别省掉这一段靠缺省值：代码的缺省是 wecom_webhook，与模板里",
       "   enabled=false 冲突，会让全新安装一上来就报「主通道指向企微但企微是关的」。"
+    ],
+    "skip_non_workdays": true,
+    "_skip_non_workdays说明": [
+      "非工作日不推主通道。定时表达式只排得掉周末，排不掉国庆春节 ——",
+      "连休期间业务在放假，每天早上照收催办。",
+      "工作日口径来自 rules.json 的 workday 与 config/holidays.json。",
+      "🔴 节假日表没启用时 is_workday() 只排周末，而定时本来就排了周末，",
+      "   等于维持现状 —— 要让它真正生效，得先填好 holidays.json 并把",
+      "   rules.json 的 workday.exclude_holidays 改成 true。doctor 会提醒。",
+      "只拦投递：判定照跑、停滞天数照算、健康记录照写。假期里没推的项目",
+      "不会被记为「已通知」，节后第一个工作日会完整推一遍。"
     ]
   },
 

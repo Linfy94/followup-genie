@@ -599,7 +599,7 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
     # 提到输出之前：投递不依赖渲染出来的文本，先做掉才能把「发没发出去」
     # 一并写进下面那段输出里。企微那边一个字都没变，只是调用顺序前移。
     delivered, delivery = _deliver(args, reports, today, output_cfg, primary,
-                                   total_due, real_run)
+                                   total_due, real_run, workday)
 
     if real_run:
         core.update_health(last_run_summary={
@@ -691,20 +691,46 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
     return exit_code
 
 
-def _deliver(args, reports, today, output_cfg, primary, total_due, real_run):
+def _deliver(args, reports, today, output_cfg, primary, total_due, real_run,
+             workday=None):
     """
     走主通道投递。返回 (delivered, detail)。
 
     delivered 的语义与此前**完全一致**，调用方的判断一个字都不用改：
       True(完整送达) / False(失败) / None(无需投递)。
-    None 的两种情形：今天没有待催（无事不发），或试跑模式被闸门拦下。
-    这两种都**不构成送达凭证**，所以也不会提交 last_notified —— 但也不算故障。
+    None 的三种情形：今天没有待催（无事不发）、试跑模式被闸门拦下、
+    今天不是工作日（法定节假日）。
+    这几种都**不构成送达凭证**，所以也不会提交 last_notified —— 但也不算故障。
 
     detail 是本次新增的展示信息，形状固定：
       {"channel", "attempted", "sent", "total", "summary"}
     只用于那行本地回执和 health.json 的 last_run_summary，**不参与任何判定**。
     """
     label = "企微" if primary == "wecom_webhook" else "stdout"
+
+    # ── 法定节假日不推 ───────────────────────────────────────────────
+    # cron 的 `0 9 * * 1-5` 只排周末，排不掉国庆春节 —— 连休期间业务在放假，
+    # 每天早上照收催办。这里补上第二道闸门。
+    #
+    # 🔴 只拦投递，**判定照跑、健康记录照写**。原因不显眼但很硬：
+    #    watchdog 的 missed_runs() 只跳周末、不认识节假日（watchdog.py 里
+    #    刻意不 import core，拿不到节假日表）。若这里静默退出、不写
+    #    last_full_success，它会把国庆七天里的五个工作日班次数成「错过 5 次」，
+    #    而告警阈值是 2 —— 国庆第二天就误报「任务根本没跑」。
+    #
+    #    所以这条**绝不能进 run_warnings**：check_followup 里
+    #    `exit_code == 0 and not run_warnings` 才写 last_full_success，
+    #    塞进去等于亲手造出那个误报。返回 None 正好——它不算故障。
+    #
+    # 工作日口径来自 rules.json 的 workday 与 config/holidays.json。
+    # 节假日表没启用时 is_workday() 只排周末，而 cron 本来就排了周末，
+    # 等于维持现状 —— 业务电脑上要等节假日表拷过去才真正生效，
+    # doctor 会就此点名提醒。
+    notify_cfg = output_cfg.get("notify") or {}
+    if (notify_cfg.get("skip_non_workdays", True) and workday is not None
+            and not workday.is_workday(today)):
+        return None, {"channel": primary, "attempted": False, "sent": 0,
+                      "total": 0, "summary": f"今天是法定节假日，{label}未发送"}
 
     if not total_due:
         return None, {"channel": primary, "attempted": False, "sent": 0,
