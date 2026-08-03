@@ -12,26 +12,29 @@ import sys
 import zipfile
 from pathlib import Path
 
+import _manifest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE_ROOT = "followup-genie"
-TOP_FILES = (
-    "KNOWN_ISSUES.md",
-    "README.md",
-    "SECURITY.md",
-    "SKILL.md",
-    "VERSION",
-)
-TOP_DIRS = ("docs", "scripts", "templates")
-EXCLUDED_SCRIPT_NAMES = {"build_release.py"}
+
+# 🔴 清单来自 _manifest.py —— **打包与安装必须用同一份**。
+#    这两处原本各写一份，然后漂移了：装出来的文件集不一样，
+#    而且 bootstrap 给了 run_tests.sh 却没给 tests/，自测按钮是坏的。
+TOP_FILES = _manifest.TOP_FILES
+TOP_DIRS = _manifest.TOP_DIRS
+EXCLUDED_SCRIPT_NAMES = set(_manifest.EXCLUDED_SCRIPT_NAMES)
+# 路径里出现这些片段就拒绝打包。注意它**不再包含 tests** ——
+# tests/ 现在是交付内容（没它 run_tests.sh 跑不了），
+# 但 followup/runtime/state/.env 这些运行时数据仍然一律禁止。
 FORBIDDEN_PARTS = {
     ".git",
     ".env",
     "__pycache__",
     "followup",
+    "notes",
     "runtime",
     "state",
-    "tests",
 }
 SENSITIVE_CONTENT = (
     re.compile(rb"/Users/"),

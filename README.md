@@ -92,15 +92,27 @@ FOLLOWUP_HOME=<运行时目录>
 > 在没装 Hermes 的宿主里让人设它是误导，于是加了中性的 `FOLLOWUP_HOME`。
 > 两个都设时前者优先；只设 `HERMES_HOME` 的老安装行为完全不变。
 
-### 一条命令完成引导
+### 一条命令完成安装
 
 ```bash
-FOLLOWUP_HOME=<运行时目录> bash scripts/setup.sh
+python3 scripts/bootstrap.py --host workbuddy --workspace <当前工作空间>
+python3 scripts/bootstrap.py --host hermes        # 或者装到 Hermes
 ```
 
-幂等，可反复执行。它会：建目录 → 复制配置模板（**已存在则跳过**）→ 建 600 权限的空 `.env` → 跑一次不联网自检。
+**`bootstrap.py` 是唯一入口。** 幂等，可反复执行。它做两件事：
+
+1. **分发**：把代码复制到该去的位置（WorkBuddy 工作空间下的 `.followup-genie/`，
+   或 Hermes 的 `skills/work/followup-genie/`）
+2. **引导**：按宿主自动调 `setup.sh`（通用）或 `install.sh`（Hermes 额外写 cron 启动器）
+
+引导那一步会：建目录 → 复制配置模板（**已存在则跳过**）→ 建 600 权限的空 `.env`
+→ 跑一次不联网自检。
 
 它**不会**：注册定时任务、填凭证、改任何开关。那些跟宿主有关，或者必须由人来做。
+
+> 下游那两个脚本也能单独跑，但只适用于「代码已经就位、只想重建配置」：
+> `FOLLOWUP_HOME=<运行时目录> bash scripts/setup.sh`。
+> **正常安装不要直接调它们** —— 那会绕过代码分发那一步。
 
 ### 填两样东西
 
@@ -255,8 +267,7 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 ## 已知边界
 
 见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.3.0-rc1` 的主要限制：
-WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**、
-两处引导脚本（`bootstrap.py` 与 `setup.sh`）功能重叠待收敛。
+WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**。
 
 ---
 

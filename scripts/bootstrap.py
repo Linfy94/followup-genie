@@ -12,26 +12,14 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+import _manifest
 
-PACKAGE_FILES = (
-    ".gitignore",
-    "CHANGELOG.md",
-    "KNOWN_ISSUES.md",
-    "README.md",
-    "SECURITY.md",
-    "SKILL.md",
-    "VERSION",
-    "run_tests.sh",
-)
-PACKAGE_DIRS = ("docs", "scripts", "templates")
-IGNORED_NAMES = {
-    ".DS_Store",
-    ".env",
-    "__pycache__",
-    "followup",
-    "runtime",
-    "state",
-}
+
+# 🔴 清单来自 _manifest.py —— **与 build_release.py 用同一份**。
+#    这两处原本各写一份然后漂移了：装出来的文件集不一样，
+#    而且这里给了 run_tests.sh 却没给 tests/，自测按钮是坏的。
+PACKAGE_FILES = _manifest.TOP_FILES
+PACKAGE_DIRS = _manifest.TOP_DIRS
 
 
 class BootstrapError(RuntimeError):
@@ -43,15 +31,8 @@ def package_root() -> Path:
 
 
 def should_ignore(_directory: str, names: Iterable[str]) -> set[str]:
-    ignored = set()
-    for name in names:
-        if (
-            name in IGNORED_NAMES
-            or name.endswith((".pyc", ".pyo", ".log"))
-            or ".corrupt." in name
-        ):
-            ignored.add(name)
-    return ignored
+    """shutil.copytree 的 ignore 回调。判断逻辑与打包共用 _manifest.should_skip。"""
+    return {name for name in names if _manifest.should_skip(name)}
 
 
 def copy_package(source: Path, destination: Path) -> None:
@@ -124,7 +105,20 @@ def install_workbuddy(source: Path, workspace: Path) -> tuple[Path, Path]:
     return skill_dir, runtime_home
 
 
-def resolve_hermes_home(explicit: str | None) -> Path:
+def locate_hermes_install(explicit: str | None) -> Path:
+    """
+    定位一个**已经存在**的 Hermes 安装。找不到就报错。
+
+    🔴 这**不是** core.hermes_home() 那个「解析运行时目录」。两者容易混：
+
+      core.hermes_home()      运行时用。目录不存在也照样返回路径 ——
+                              因为引导阶段本来就要去创建它
+      locate_hermes_install() 安装时用。目录必须已存在 ——
+                              往一个不存在的 Hermes 里装 skill 没有意义，
+                              静默创建 ~/.hermes 只会让人以为装好了
+
+    名字分开是为了让下次读代码的人不必再推一遍这个区别。
+    """
     if explicit:
         return Path(explicit).expanduser().resolve()
     configured = os.environ.get("HERMES_HOME")
@@ -172,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
             workspace = Path(args.workspace or os.getcwd()).expanduser().resolve()
             skill_dir, runtime_home = install_workbuddy(source, workspace)
         else:
-            home = resolve_hermes_home(args.hermes_home)
+            home = locate_hermes_install(args.hermes_home)
             skill_dir, runtime_home = install_hermes(source, home)
     except BootstrapError as exc:
         print(f"❌ 项目跟进精灵安装失败：{exc}", file=sys.stderr)

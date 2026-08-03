@@ -49,8 +49,11 @@ runtime/
     └── state/
 ```
 
-后续调用脚本时始终令 `FOLLOWUP_HOME` 指向这个 `runtime`。不要运行 `scripts/install.sh`，
-它是 Hermes 专用安装器。
+后续调用脚本时始终令 `FOLLOWUP_HOME` 指向这个 `runtime`。
+
+**不要自己挑安装脚本。** 唯一入口是 `python3 scripts/bootstrap.py --host workbuddy --workspace <当前工作空间>`，
+它会把代码放到该放的位置，再自动选对下游脚本（WorkBuddy 走 `setup.sh`，Hermes 走 `install.sh`）。
+自己直接调 `setup.sh` 或 `install.sh` 会绕过代码分发那一步。
 
 ### 2. 初始化配置
 

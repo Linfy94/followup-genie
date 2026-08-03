@@ -11,17 +11,24 @@
 #   4. 跑一次不联网的配置自检
 #
 # 不做的事：不注册定时任务、不写 cron shim、不碰凭证、不改任何开关。
-# 那些都跟宿主有关，交给 install.sh（Hermes）或宿主自己的自动化。
+# 那些都跟宿主有关。
 #
-# Hermes 用户不用直接跑这个 —— scripts/install.sh 会先调它，再做 Hermes 专属的部分。
+# 🔴 **通常不用直接跑这个。** 对外的唯一入口是：
+#      python3 scripts/bootstrap.py --host workbuddy|hermes
+#    它会把代码放到该放的位置，再按宿主调 setup.sh（通用）或 install.sh（Hermes）。
+#    直接跑本脚本只适用于一种情况：代码已经就位，只想重建配置目录。
 
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# 运行时目录：FOLLOWUP_HOME 优先，HERMES_HOME 兼容，都没有则用平台默认。
-# 这三级与 scripts/core.py 的 hermes_home() 完全一致 —— 引导建在哪，
-# 程序就得从哪读，不一致会表现成「装完了却说配置不存在」。
+# 运行时目录：FOLLOWUP_HOME 优先，HERMES_HOME 兼容。
+# 前两级与 scripts/core.py 的 hermes_home() 一致 —— 引导建在哪，程序就得从哪读，
+# 不一致会表现成「装完了却说配置不存在」。
+#
+# ⚠️ 第三级**刻意不同**：core 在 ~/.hermes 不存在时也照样返回该路径
+#    （运行时要靠它去创建），而这里要求目录已存在才认 ——
+#    引导阶段猜错位置会把配置建到一个没人会去读的地方。
 if [ -n "${FOLLOWUP_HOME:-}" ]; then
   HOME_DIR="$FOLLOWUP_HOME"
   HOW="FOLLOWUP_HOME"

@@ -10,6 +10,11 @@
 #
 # 不做的事：不注册 cron（那一步要人看过自检结果再决定）、不改写入开关、
 #          不填 .env（凭证要业务本人扫码）。
+#
+# 🔴 **通常不用直接跑这个。** 对外的唯一入口是：
+#      python3 scripts/bootstrap.py --host hermes
+#    它会先把代码复制到 Hermes 的 skill 目录，再调本脚本。
+#    直接跑本脚本只适用于一种情况：代码已经在 skill 目录里，只想重建配置与 shim。
 
 set -euo pipefail
 

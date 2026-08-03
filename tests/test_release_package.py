@@ -70,9 +70,23 @@ class ReleasePackageTest(unittest.TestCase):
                 names = archive.namelist()
                 self.assertIn("followup-genie/scripts/bootstrap.py", names)
                 self.assertIn("followup-genie/README.md", names)
-                self.assertFalse(any("/tests/" in name for name in names))
+
+                # 🔴 口径变更（2026-08-03）：tests/ 与 run_tests.sh 现在**进包**。
+                #    交付标准是「最小能让业务接入其他台账并自测」，
+                #    而 run_tests.sh 的内容是 `unittest discover -s tests` ——
+                #    只给脚本不给目录等于给了一个必然报错的按钮。
+                self.assertIn("followup-genie/run_tests.sh", names)
+                self.assertTrue(any("/tests/" in name for name in names),
+                                "没有 tests/ 的话 run_tests.sh 是坏的")
+
+                # 运行时数据与开发过程记录一律不进包
                 self.assertFalse(any("__pycache__" in name for name in names))
                 self.assertFalse(any(name.endswith("/.env") for name in names))
+                self.assertFalse(any("/notes/" in name for name in names),
+                                 "开发过程记录含开发机路径，不交付")
+                for part in ("/followup/", "/state/", "/runtime/"):
+                    self.assertFalse(any(part in name for name in names),
+                                     f"{part} 是运行时数据，绝不能进包")
                 self.assertNotIn(
                     "followup-genie/scripts/build_release.py",
                     names,
