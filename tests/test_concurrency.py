@@ -471,6 +471,18 @@ class RealRaceTest(unittest.TestCase):
             self.assertTrue(observed[0][1].strip(), "临时文件必须先写好完整内容")
             core.release_lock(path, token)
 
+    def test_failed_lock_write_leaves_no_visible_or_temporary_lock(self):
+        """磁盘写入失败不能遗留新的垃圾锁或挡住下一次运行。"""
+        with temp_home() as home:
+            state = home / "followup" / "state"
+            with mock.patch.object(core.os, "fsync",
+                                   side_effect=OSError("模拟磁盘失败")):
+                with self.assertRaises(OSError):
+                    core.acquire_lock()
+
+            self.assertFalse((state / core.LOCK_FILE).exists())
+            self.assertEqual(list(state.glob(f".{core.LOCK_FILE}.create.*")), [])
+
     def test_garbage_lock_is_still_reclaimable(self):
         """
         自愈不能矫枉过正：**有内容**但解析不了的锁，仍然该夺回。

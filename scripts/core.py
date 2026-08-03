@@ -447,18 +447,18 @@ def _create_lock_exclusive(p: Path, payload: str) -> bool:
     的目标，因此多个进程同时调用时仍然只有一个成功；目标一旦可见就已有完整内容。
     """
     tmp = p.with_name(f".{p.name}.create.{uuid.uuid4().hex}")
-    fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     try:
-        data = memoryview(payload.encode("utf-8"))
-        while data:
-            written = os.write(fd, data)
-            if written <= 0:
-                raise OSError("运行锁内容没有完整写入")
-            data = data[written:]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    try:
+        fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            data = memoryview(payload.encode("utf-8"))
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise OSError("运行锁内容没有完整写入")
+                data = data[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         try:
             os.link(str(tmp), str(p))
         except FileExistsError:
