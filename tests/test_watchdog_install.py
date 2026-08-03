@@ -148,6 +148,48 @@ class PlistContentTest(unittest.TestCase):
         _, plist, python = watchdog.install("0.3.0-rc2")
         return plist.read_text(encoding="utf-8"), python
 
+    def test_generated_plist_is_valid_xml_and_parses_as_a_plist(self):
+        """
+        🔴 生成的 plist 必须能被**严格的**解析器读出来。
+
+        踩过一次：注释里写了 `--install`，而 XML 规范禁止注释中出现连续两个
+        减号。launchd 自己的解析器容忍度高、照样加载了，所以在开发机上
+        完全看不出问题；但 plistlib、xmllint 这类严格解析器直接报
+        `not well-formed`。
+
+        为什么必须守住：plist 一旦被某个 macOS 版本或某个工具判为非法，
+        launchd 就不加载它 —— 而**监控器不加载的表现就是「一切安静」**，
+        和「一切正常」长得一模一样。这正是整个 watchdog 存在的理由。
+        """
+        import plistlib
+        with temp_home() as home:
+            _, plist, python = watchdog.install("0.3.0-rc2")
+            raw = plist.read_bytes()
+
+            # 严格 XML 解析 —— launchd 的宽容度不能当作正确性依据
+            import xml.dom.minidom
+            xml.dom.minidom.parseString(raw.decode("utf-8"))
+
+            data = plistlib.loads(raw)
+            self.assertEqual(data["Label"], watchdog.LAUNCHD_LABEL)
+            self.assertEqual(data["ProgramArguments"][0], python)
+            self.assertEqual(data["ProgramArguments"][1],
+                             str(home / "watchdog" / "watchdog.py"))
+            self.assertEqual(data["EnvironmentVariables"]["FOLLOWUP_HOME"],
+                             str(home))
+            self.assertTrue(data["RunAtLoad"])
+            self.assertTrue(data["StartCalendarInterval"])
+
+    def test_no_comment_contains_a_double_dash(self):
+        """把上面那条的根因单独钉死，报错信息才指得准。"""
+        import re
+        with temp_home():
+            _, plist, _ = watchdog.install()
+            text = plist.read_text(encoding="utf-8")
+            for c in re.findall(r"<!--(.*?)-->", text, re.S):
+                self.assertNotIn("--", c,
+                                 "XML 注释里不许有连续两个减号，会让 plist 非法")
+
     def test_points_at_the_independent_copy_not_the_skill(self):
         with temp_home() as home:
             text, _ = self._plist(home)

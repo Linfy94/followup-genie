@@ -409,11 +409,27 @@ def find_python() -> str:
 
 
 def render_plist(python: str, script: Path, home: Path, hour: int) -> str:
-    """生成填好真实路径的 plist —— 不再让人对着「请改成…」手抄。"""
+    """
+    生成填好真实路径的 plist —— 不再让人对着「请改成…」手抄。
+
+    🔴 **plist 里的 XML 注释绝不能出现连续两个减号。** XML 规范禁止，
+       写了整个文件就是非法 XML。
+
+       这条踩过一次：注释里写了 install 那个带两个减号的参数写法。
+       launchd 自己的解析器容忍度高、照样加载了，所以在开发机上
+       **完全看不出问题**；但 plistlib、xmllint 这类严格解析器直接报
+       `not well-formed`。
+
+       代价可能很大：plist 一旦被某个 macOS 版本或某个工具判为非法，
+       launchd 就不加载它 —— 而**监控器不加载的表现就是「一切安静」**，
+       和「一切正常」长得一模一样。这正是整个 watchdog 存在的理由。
+
+       tests/test_watchdog_install.py 里有两条测试钉着这件事。
+    """
     hermes_bin = Path.home() / ".local" / "bin"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- 由 `watchdog.py --install` 生成，不要手改；重装会覆盖。 -->
+<!-- 由 watchdog.py 的 install 子命令生成，不要手改；重装会覆盖。 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
