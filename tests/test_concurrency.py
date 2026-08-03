@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import unittest
 from datetime import date, timedelta
@@ -539,6 +540,59 @@ class MetadataGuardTest(unittest.TestCase):
             second.join(timeout=30)
             results = [queue.get(timeout=10), queue.get(timeout=10)]
             self.assertEqual([kind for kind, _ in results].count("ok"), 2, results)
+
+
+class StateFileConcurrencyTest(unittest.TestCase):
+
+    def _run_two_at_same_write(self, operation, name_prefix):
+        barrier = threading.Barrier(2)
+        real_write = Path.write_text
+        errors = []
+        temporary_names = []
+
+        def paused_write(path, *args, **kwargs):
+            result = real_write(path, *args, **kwargs)
+            if path.name.startswith(name_prefix):
+                temporary_names.append(path.name)
+                barrier.wait(timeout=10)
+            return result
+
+        def run():
+            try:
+                operation()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with mock.patch.object(Path, "write_text", paused_write):
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=15)
+        self.assertFalse([t for t in threads if t.is_alive()], "并发测试没有按时结束")
+        self.assertEqual(len(set(temporary_names)), 2,
+                         f"并发操作不应共用临时文件名：{temporary_names}")
+        self.assertEqual(errors, [], f"两个进程共享临时文件名导致其中一个失败：{errors}")
+
+    def test_state_directory_probes_do_not_delete_each_other(self):
+        with temp_home():
+            self._run_two_at_same_write(core.ensure_state_dir, ".write_probe")
+
+    def test_state_writes_do_not_share_one_temporary_file(self):
+        with temp_home() as home:
+            counter = {"n": 0}
+            counter_lock = threading.Lock()
+
+            def write():
+                with counter_lock:
+                    counter["n"] += 1
+                    value = counter["n"]
+                core.write_state("concurrent.json", {"writer": value})
+
+            self._run_two_at_same_write(write, "concurrent.json.tmp")
+            final = json.loads((home / "followup" / "state" / "concurrent.json")
+                               .read_text(encoding="utf-8"))
+            self.assertIn(final["writer"], (1, 2))
 
 
 if __name__ == "__main__":

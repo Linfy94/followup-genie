@@ -350,13 +350,18 @@ def ensure_state_dir() -> None:
     那时消息已经发了，状态却没落地，下次会重推。宁可开跑前就失败。
     """
     d = state_dir()
+    probe = d / f".write_probe.{uuid.uuid4().hex}"
     try:
         d.mkdir(parents=True, exist_ok=True)
-        probe = d / ".write_probe"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
     except OSError as e:
         raise LedgerError(f"状态目录不可写：{d}（{type(e).__name__}: {e}）")
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
 
 
 def write_state(name: str, data: dict) -> None:
@@ -364,9 +369,15 @@ def write_state(name: str, data: dict) -> None:
         return
     state_dir().mkdir(parents=True, exist_ok=True)
     p = _state_path(name)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(p)  # 原子替换，避免写一半被中断留下坏文件
+    tmp = p.with_name(f"{p.name}.tmp.{uuid.uuid4().hex}")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(p)  # 原子替换，避免写一半被中断留下坏文件
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 # ── 健康记录 ──────────────────────────────────────────────────────────
