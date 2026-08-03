@@ -339,9 +339,11 @@ class SurvivesSkillDeletionTest(unittest.TestCase):
             self._run(skill / "scripts" / "watchdog.py", home, "--install")
             shutil.rmtree(skill)
 
-            r = self._run(home / "watchdog" / "watchdog.py", home)
-            # 判定要么正常要么告警失败（这个环境里发不出去），但不能是 import 崩
-            self.assertIn(r.returncode, (0, 1), r.stderr)
+            # 必须用 dry-run：本测试只验证副本独立，正常模式会真的尝试
+            # hermes send / osascript，违反「测试不碰真实世界」的硬约束。
+            r = self._run(home / "watchdog" / "watchdog.py", home, "--dry-run")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("需要告警", r.stdout)
             self.assertNotIn("ModuleNotFoundError", r.stderr)
             self.assertNotIn("Traceback", r.stderr)
 
