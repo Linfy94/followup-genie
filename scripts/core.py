@@ -19,8 +19,14 @@ import json
 import os
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover —— Windows 尚未列入本轮支持范围
+    fcntl = None
 
 import qqdoc
 from qqdoc import LedgerError
@@ -395,8 +401,10 @@ def now_iso() -> str:
 # ── 运行锁 ────────────────────────────────────────────────────────────
 
 LOCK_FILE = ".run.lock"
+LOCK_GUARD_FILE = ".run.lock.guard"
 LOCK_STALE_SECONDS = 30 * 60        # 超过它才考虑「是不是卡住了」
 LOCK_ABANDON_SECONDS = 6 * 60 * 60  # 进程还活着也当它僵死的绝对上限
+EMPTY_LOCK_GRACE_SECONDS = 30       # 兼容升级时仍在运行的旧版两段式建锁
 
 # 抢锁标记多久算「残留」。
 #
@@ -435,21 +443,48 @@ def _create_lock_exclusive(p: Path, payload: str) -> bool:
     """
     只有在锁不存在时才创建成功。**这是整套并发保护唯一的原子操作。**
 
-    O_CREAT|O_EXCL 由内核保证：多个进程同时调用，有且只有一个拿到文件描述符。
+    先完整写同目录临时文件，再用硬链接发布到目标路径。`os.link` 不覆盖已存在
+    的目标，因此多个进程同时调用时仍然只有一个成功；目标一旦可见就已有完整内容。
     """
+    tmp = p.with_name(f".{p.name}.create.{uuid.uuid4().hex}")
+    fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     try:
-        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        return False
-    try:
-        # ⚠️ 建文件与写内容之间，别的进程会看到一个 0 字节的锁。
-        #    单次 os.write 已经是能做到的最窄窗口（O_EXCL 要求先建文件，
-        #    没法「先写好再让它可见」）。读侧因此必须把空文件当成
-        #    「正在创建」而不是「损坏的陈旧锁」—— 见 acquire_lock。
-        os.write(fd, payload.encode("utf-8"))
+        data = memoryview(payload.encode("utf-8"))
+        while data:
+            written = os.write(fd, data)
+            if written <= 0:
+                raise OSError("运行锁内容没有完整写入")
+            data = data[written:]
+        os.fsync(fd)
     finally:
         os.close(fd)
-    return True
+    try:
+        try:
+            os.link(str(tmp), str(p))
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+@contextmanager
+def _lock_metadata_guard():
+    """串行化运行锁的检查、抢占和释放；进程退出时由内核自动解锁。"""
+    state_dir().mkdir(parents=True, exist_ok=True)
+    guard = _state_path(LOCK_GUARD_FILE)
+    fd = os.open(str(guard), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _claim_steal_right(marker: Path, payload: str) -> None:
@@ -503,6 +538,14 @@ def _claim_steal_right(marker: Path, payload: str) -> None:
 
 
 def acquire_lock() -> tuple[Path, str, str | None]:
+    """在系统级元数据保护下取得运行锁。"""
+    if _block("acquire_lock"):
+        raise LedgerError("只读模式不该加锁 —— 调用方应先判断 real_run")
+    with _lock_metadata_guard():
+        return _acquire_lock_under_guard()
+
+
+def _acquire_lock_under_guard() -> tuple[Path, str, str | None]:
     """
     取运行锁。返回 `(锁路径, owner_token, 夺锁告警或 None)`。
 
@@ -537,8 +580,6 @@ def acquire_lock() -> tuple[Path, str, str | None]:
     **必须能夺回** —— 否则一次卡死会让之后每天都静默跳过，
     而「每天静默跳过」和「每天没有超时单」长得一模一样。
     """
-    if _block("acquire_lock"):
-        raise LedgerError("只读模式不该加锁 —— 调用方应先判断 real_run")
     state_dir().mkdir(parents=True, exist_ok=True)
 
     # 🔴 先扫一遍残留标记，**无论后面走哪条路**。
@@ -585,8 +626,16 @@ def acquire_lock() -> tuple[Path, str, str | None]:
             #    结果：创建者以为自己持锁（它的 fd 指向已被替换掉的 inode），
             #    夺锁者也以为自己持锁，**两个进程同时在跑**。
             #
-            #    合法的废弃锁一定有内容，所以空文件只可能是这个中间态：让路。
-            raise LockBusy("另一个进程正在创建运行锁，本次让路")
+            # 新版本原子发布，不再产生空目标；但升级时可能仍有旧版进程正在用
+            # 两段式建锁。新鲜空锁先让路，超过宽限期则视为创建者已死并恢复。
+            try:
+                empty_age = datetime.now().timestamp() - p.stat().st_mtime
+            except OSError:
+                continue
+            if empty_age < EMPTY_LOCK_GRACE_SECONDS:
+                raise LockBusy("另一个进程正在创建运行锁，本次让路")
+            holder = {}
+            break
         holder = _read_lock(p)
         break
     else:
@@ -620,7 +669,7 @@ def acquire_lock() -> tuple[Path, str, str | None]:
     if age is None and holder:
         why.append("锁文件里没有可解析的开始时间")
     if not holder:
-        why.append("锁文件内容无法解析")
+        why.append("锁文件为空或内容无法解析")
 
     # ── 原子夺锁 ──
     # 🔴 「先 unlink 再 O_EXCL 重建」**不够**，这是实测抓出来的：
@@ -693,17 +742,18 @@ def release_lock(p: Path, token: str) -> None:
     不核对的话：A 的锁被 B 夺走后，A 跑完照样把 B 的锁删掉，
     于是 C 进来又拿到锁 —— 并发保护归零，而且完全无声。
     """
-    cur = _read_lock(p)
-    if not cur:
-        return                      # 已经没了或读不出来，不折腾
-    if cur.get("token") != token:
-        print("⚠️  运行锁已被其他进程接管，本进程不删它（避免误删别人的锁）",
-              file=sys.stderr)
-        return
-    try:
-        p.unlink()
-    except OSError:
-        pass
+    with _lock_metadata_guard():
+        cur = _read_lock(p)
+        if not cur:
+            return                  # 已经没了或读不出来，不折腾
+        if cur.get("token") != token:
+            print("⚠️  运行锁已被其他进程接管，本进程不删它（避免误删别人的锁）",
+                  file=sys.stderr)
+            return
+        try:
+            p.unlink()
+        except OSError:
+            pass
 
 
 def parse_dt(s: str | None) -> datetime | None:

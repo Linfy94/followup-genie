@@ -15,6 +15,7 @@ import os
 import time
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
 from unittest import mock
 
 from harness import (core, make_sheet, row, temp_home, run_main, read_state)
@@ -436,6 +437,40 @@ class RealRaceTest(unittest.TestCase):
             with self.assertRaises(core.LockBusy):
                 core.acquire_lock()
 
+    def test_abandoned_empty_lock_is_recovered(self):
+        """创建者死在写入前留下的空锁，过宽限期后必须能自愈。"""
+        with temp_home() as home:
+            p = home / "followup" / "state" / core.LOCK_FILE
+            p.touch()
+            old = time.time() - core.EMPTY_LOCK_GRACE_SECONDS - 1
+            os.utime(p, (old, old))
+
+            path, token, steal = core.acquire_lock()
+
+            self.assertIsNotNone(steal, "永久空锁应该被夺回并告警")
+            self.assertEqual(core._read_lock(path).get("token"), token)
+            core.release_lock(path, token)
+
+    def test_lock_is_published_only_after_payload_is_complete(self):
+        """目标路径出现时必须已经有完整内容，不能先暴露 0 字节文件。"""
+        with temp_home() as home:
+            p = home / "followup" / "state" / core.LOCK_FILE
+            real_link = os.link
+            observed = []
+
+            def inspect_then_link(src, dst):
+                if Path(dst) == p:
+                    observed.append((p.exists(), Path(src).read_bytes()))
+                return real_link(src, dst)
+
+            with mock.patch.object(core.os, "link", side_effect=inspect_then_link):
+                path, token, _ = core.acquire_lock()
+
+            self.assertEqual(len(observed), 1)
+            self.assertFalse(observed[0][0], "发布前目标锁不应可见")
+            self.assertTrue(observed[0][1].strip(), "临时文件必须先写好完整内容")
+            core.release_lock(path, token)
+
     def test_garbage_lock_is_still_reclaimable(self):
         """
         自愈不能矫枉过正：**有内容**但解析不了的锁，仍然该夺回。
@@ -462,6 +497,36 @@ class RealRaceTest(unittest.TestCase):
             tokens = [tok for got in self._race(home)
                       for kind, tok in got if kind == "ok"]
             self.assertEqual(len(tokens), len(set(tokens)), "token 不许重复")
+
+
+class MetadataGuardTest(unittest.TestCase):
+    """抢占判断与释放必须串行，否则检查后到替换/删除前仍有竞态。"""
+
+    def test_second_process_cannot_enter_until_first_leaves(self):
+        import multiprocessing as mp
+        import lockworker
+
+        with temp_home():
+            ctx = mp.get_context("spawn")
+            first_entered = ctx.Event()
+            second_entered = ctx.Event()
+            release = ctx.Event()
+            queue = ctx.Queue()
+            first = ctx.Process(target=lockworker.hold_metadata_guard,
+                                args=(first_entered, release, queue))
+            second = ctx.Process(target=lockworker.enter_metadata_guard,
+                                 args=(second_entered, queue))
+            first.start()
+            self.assertTrue(first_entered.wait(timeout=30))
+            second.start()
+            self.assertFalse(second_entered.wait(timeout=0.3),
+                             "第二个进程不该同时修改锁元数据")
+            release.set()
+            self.assertTrue(second_entered.wait(timeout=30))
+            first.join(timeout=30)
+            second.join(timeout=30)
+            results = [queue.get(timeout=10), queue.get(timeout=10)]
+            self.assertEqual([kind for kind, _ in results].count("ok"), 2, results)
 
 
 if __name__ == "__main__":

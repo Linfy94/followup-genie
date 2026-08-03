@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -67,3 +68,31 @@ def release_someone_elses(queue, fake_token: str):
 
     core.release_lock(core.state_dir() / core.LOCK_FILE, fake_token)
     queue.put(("released", fake_token))
+
+
+def hold_metadata_guard(entered, release, queue):
+    """持有锁元数据保护，供父进程确定性验证第二个进程不能同时进入。"""
+    import core   # noqa: E402
+
+    try:
+        with core._lock_metadata_guard():
+            entered.set()
+            if not release.wait(timeout=30):
+                queue.put(("error", "等待父进程释放信号超时"))
+                return
+            time.sleep(0.05)
+        queue.put(("ok", "released"))
+    except Exception as e:  # noqa: BLE001
+        queue.put(("error", f"{type(e).__name__}: {e}"))
+
+
+def enter_metadata_guard(entered, queue):
+    """尝试进入锁元数据保护；进入后立即报告。"""
+    import core   # noqa: E402
+
+    try:
+        with core._lock_metadata_guard():
+            entered.set()
+        queue.put(("ok", "entered"))
+    except Exception as e:  # noqa: BLE001
+        queue.put(("error", f"{type(e).__name__}: {e}"))
