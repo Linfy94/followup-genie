@@ -158,6 +158,22 @@ class MissingHealthTest(unittest.TestCase):
         self.assertTrue(need)
         self.assertIn("凭证失效", why)
 
+    def test_malformed_last_failure_does_not_crash_the_monitor(self):
+        need, key, why = watchdog.judge(
+            {"last_failure": "损坏的字段"}, {}, watchdog.DEFAULTS,
+            dt("2026-08-01T10:00:00+08:00"))
+        self.assertTrue(need)
+        self.assertEqual(key, "never-succeeded")
+        self.assertIn("无法读取", why)
+
+    def test_future_success_timestamp_alerts_instead_of_hiding_failures(self):
+        need, key, why = watchdog.judge(
+            health("2026-08-10T09:00:00+08:00"), {}, watchdog.DEFAULTS,
+            dt("2026-08-01T10:00:00+08:00"))
+        self.assertTrue(need)
+        self.assertEqual(key, "future-success:2026-08-10T09:00:00+08:00")
+        self.assertIn("未来", why)
+
     def test_corrupt_health_is_treated_as_missing(self):
         """health.json 坏掉时 read_json 返回 {} —— 等同于没成功过，要报。"""
         with temp_home(state={"health.json": "{ 坏 "}):
@@ -194,6 +210,41 @@ class DedupeTest(unittest.TestCase):
                                    return_value=(True, "stub")) as send:
                 watchdog.main([])
                 send.assert_called_once()
+
+    def test_future_dedupe_timestamp_does_not_suppress_alerts(self):
+        """时钟回拨或状态损坏不能让同一故障一直被当成刚告警过。"""
+        with temp_home(state={
+            "health.json": health("2026-07-27T09:00:00+08:00"),
+            "watchdog_state.json": {
+                "last_alert_at": "2026-09-01T09:00:00+08:00",
+                "last_alert_key": "stale:2026-07-27T09:00:00+08:00"},
+        }):
+            with mock.patch.object(watchdog, "send_alert",
+                                   return_value=(True, "stub")) as send, \
+                 mock.patch.object(watchdog, "datetime") as m:
+                m.now.return_value = dt("2026-08-03T15:00:00+08:00")
+                m.combine = datetime.combine
+                m.fromisoformat = datetime.fromisoformat
+                watchdog.main([])
+                send.assert_called_once()
+
+
+class WatchdogStateCorruptionTest(unittest.TestCase):
+
+    def test_non_numeric_counters_are_reset_instead_of_crashing(self):
+        with temp_home(state={
+            "health.json": health("2026-07-01T09:00:00+08:00"),
+            "watchdog_state.json": {"checks": "很多", "alert_failures": "很多"},
+        }) as home:
+            with mock.patch.object(watchdog, "send_alert",
+                                   return_value=(False, "stub")):
+                code = watchdog.main([])
+
+            self.assertEqual(code, 1)
+            state = json.loads((home / "followup" / "state" / "watchdog_state.json")
+                               .read_text(encoding="utf-8"))
+            self.assertEqual(state["checks"], 1)
+            self.assertEqual(state["alert_failures"], 1)
 
 
 class AlertChainTest(unittest.TestCase):

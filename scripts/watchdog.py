@@ -208,6 +208,17 @@ def parse_dt(s) -> datetime | None:
     return d if d.tzinfo else d.astimezone()
 
 
+def nonnegative_int(value) -> int:
+    """读取监控器自己的计数；损坏值退回 0，不能反过来拖垮监控。"""
+    if isinstance(value, bool):
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return number if number >= 0 else 0
+
+
 # ── 判定 ──────────────────────────────────────────────────────────────
 
 def missed_runs(last_ok: datetime, now: datetime, hour: int,
@@ -264,9 +275,18 @@ def judge(health: dict, wd_state: dict, cfg: dict,
     last_ok = parse_dt(health.get("last_full_success"))
     if not last_ok:
         f = health.get("last_failure") or {}
+        if not isinstance(f, dict):
+            f = {"stage": "?", "reason": "失败记录损坏，无法读取"}
         return (True, "never-succeeded",
                 f"**有健康记录，但从来没有过一次完整成功。**\n"
                 f"最近一次失败：[{f.get('stage', '?')}] {str(f.get('reason', ''))[:200]}")
+
+    if last_ok - now > timedelta(minutes=5):
+        return (True, f"future-success:{health.get('last_full_success')}",
+                f"**健康记录里的上次成功时间位于未来。**\n"
+                f"记录值：{health.get('last_full_success')}\n"
+                f"当前时间：{now.isoformat(timespec='seconds')}\n"
+                f"可能是系统时钟回拨或 health.json 损坏；不能按正常状态处理。")
 
     missed = missed_runs(last_ok, now, hour, weekends)
     hours = (now - last_ok).total_seconds() / 3600
@@ -559,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
     # last_check_at 会停在某个时间点上，下次有人看的时候就知道了。
     new_state = dict(wd_state)
     new_state["last_check_at"] = now.isoformat(timespec="seconds")
-    new_state["checks"] = int(wd_state.get("checks") or 0) + 1
+    new_state["checks"] = nonnegative_int(wd_state.get("checks")) + 1
     if not health and not wd_state.get("first_seen_missing"):
         new_state["first_seen_missing"] = now.isoformat(timespec="seconds")
     if health:
@@ -569,8 +589,9 @@ def main(argv: list[str] | None = None) -> int:
     if alert_needed:
         last_at = parse_dt(wd_state.get("last_alert_at"))
         same = wd_state.get("last_alert_key") == key
-        within = (last_at is not None
-                  and (now - last_at).total_seconds() / 3600
+        elapsed = ((now - last_at).total_seconds() / 3600
+                   if last_at is not None else None)
+        within = (elapsed is not None and 0 <= elapsed
                   < cfg["repeat_alert_hours"])
         if same and within:
             print(f"🔁 同一故障已在 {wd_state.get('last_alert_at')} 告警过，本次不重复")
@@ -599,8 +620,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 # 失败只留诊断痕迹，**不进去重判定** —— 下次检查必定重试。
                 new_state["last_alert_failed_at"] = now.isoformat(timespec="seconds")
-                new_state["alert_failures"] = int(
-                    wd_state.get("alert_failures") or 0) + 1
+                new_state["alert_failures"] = nonnegative_int(
+                    wd_state.get("alert_failures")) + 1
 
             print(f"{'✅ 已告警' if ok else '🔴 告警发不出去'}（{how}）\n{why}")
             if not ok:
