@@ -21,8 +21,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -281,6 +284,45 @@ class PlistContentTest(unittest.TestCase):
         hours = [item["Hour"] for item in data["StartCalendarInterval"]]
         self.assertEqual(hours, [0, 5])
         self.assertTrue(all(0 <= hour <= 23 for hour in hours))
+
+
+class InstallHintQuotingTest(unittest.TestCase):
+    """
+    `--install` 打印的三条命令是要用户手抄进 shell 的。路径来自 FOLLOWUP_HOME，
+    含空格或中文很常见 —— 不加引号，shell 会把一条命令拆成一堆参数，
+    而报错（文件不存在）跟真因（引号）对不上，用户排查不出来。
+    """
+
+    def test_paths_with_spaces_survive_a_copy_paste(self):
+        with tempfile.TemporaryDirectory(prefix="fg-wd space-") as raw:
+            home = Path(raw) / "工作 空间" / "runtime"
+            home.mkdir(parents=True)
+
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"FOLLOWUP_HOME": str(home)}), \
+                 contextlib.redirect_stdout(out):
+                self.assertEqual(watchdog.main(["--install"]), 0)
+
+            lines = [l.strip() for l in out.getvalue().splitlines()]
+            cp = next(l for l in lines if l.startswith("cp "))
+            load = next(l for l in lines if l.startswith("launchctl load "))
+            self_test = next(l for l in lines if "--self-test" in l)
+
+            plist = home / "watchdog" / f"{watchdog.LAUNCHD_LABEL}.plist"
+            script = home / "watchdog" / "watchdog.py"
+
+            # 按 shell 自己的规则拆 —— 词数对不上就说明会被拆散
+            self.assertEqual(shlex.split(cp),
+                             ["cp", str(plist), "~/Library/LaunchAgents/"])
+            self.assertEqual(shlex.split(load),
+                             ["launchctl", "load",
+                              f"~/Library/LaunchAgents/{plist.name}"])
+            self.assertEqual(shlex.split(self_test, comments=True)[1:],
+                             [str(script), "--self-test"])
+
+            # `~` 不能被包进引号，否则 shell 不展开它，会去找一个真叫 ~ 的目录
+            self.assertIn("~/Library/LaunchAgents/", cp)
+            self.assertIn("~/Library/LaunchAgents/", load)
 
 
 class SurvivesSkillDeletionTest(unittest.TestCase):

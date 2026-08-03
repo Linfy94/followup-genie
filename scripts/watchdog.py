@@ -45,6 +45,7 @@ import argparse
 import json
 import os
 import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -542,9 +543,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"   Python：{python}（安装时检测到的）")
         print(f"   plist：{plist}")
         print("\n还差三条命令，需要你自己跑（我不替你动 launchd）：")
-        print(f"  cp {plist} ~/Library/LaunchAgents/")
-        print(f"  launchctl load ~/Library/LaunchAgents/{plist.name}")
-        print(f"  {python} {script} --self-test    # 会真发一条消息，收到才算通")
+        # 路径来自用户的 FOLLOWUP_HOME，可能含空格或中文 —— 不加引号的话
+        # 用户照抄这几行会被 shell 按空格拆散。`~` 必须留在引号外面才展开。
+        print(f"  cp {shlex.quote(str(plist))} ~/Library/LaunchAgents/")
+        print(f"  launchctl load ~/Library/LaunchAgents/{shlex.quote(plist.name)}")
+        print(f"  {shlex.quote(python)} {shlex.quote(str(script))} "
+              f"--self-test    # 会真发一条消息，收到才算通")
         return 0
 
     now = datetime.now().astimezone()
