@@ -20,7 +20,14 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import build_release  # noqa: E402
+# 🔴 build_release.py 是开发工具，**不进交付包**（_manifest.EXCLUDED_SCRIPT_NAMES）。
+#    从 zip 装出来的副本里没有它，所以这里不能硬 import ——
+#    否则业务点一下 run_tests.sh 就是两条 ImportError。
+#    交付包里没有可打包的东西，本组测试跳过才是对的。
+try:
+    import build_release  # noqa: E402
+except ModuleNotFoundError:  # pragma: no cover —— 只在装出来的副本里发生
+    build_release = None
 
 
 def file_sha256(path: Path) -> str:
@@ -32,12 +39,19 @@ VERSION = (pathlib.Path(__file__).resolve().parent.parent / "VERSION"
            ).read_text(encoding="utf-8").strip()
 
 
+# 装出来的副本里没有打包工具，整组跳过（见上面的说明）。
+requires_build_release = unittest.skipIf(
+    build_release is None, "交付包里没有 build_release.py，无需也无法测打包")
+
+
+@requires_build_release
 class SkillMetadataTest(unittest.TestCase):
 
     def test_frontmatter_uses_only_standard_fields(self):
         build_release.validate_skill_frontmatter()
 
 
+@requires_build_release
 class ReleasePackageTest(unittest.TestCase):
 
     def test_build_hashes_contents_and_install_from_archive(self):

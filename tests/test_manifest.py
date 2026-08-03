@@ -33,11 +33,21 @@ import harness  # noqa: F401 —— 只为触发它把 scripts/ 挂上 sys.path
 
 import _manifest        # noqa: E402
 import bootstrap        # noqa: E402
-import build_release    # noqa: E402
+
+# 🔴 build_release.py 是开发工具，不进交付包。装出来的副本里没有它 ——
+#    硬 import 的话，业务点一下 run_tests.sh 就是一条 ImportError。
+try:
+    import build_release    # noqa: E402
+except ModuleNotFoundError:  # pragma: no cover —— 只在装出来的副本里发生
+    build_release = None
+
+requires_build_release = unittest.skipIf(
+    build_release is None, "交付包里没有 build_release.py，无需也无法测打包")
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
+@requires_build_release
 class SingleSourceTest(unittest.TestCase):
     """两条安装路径必须用同一份清单。"""
 
@@ -118,6 +128,7 @@ class VersionStampTest(unittest.TestCase):
             self.assertEqual(others, set(),
                              f"{name} 里还留着别的版本号：{sorted(others)}")
 
+    @requires_build_release
     def test_build_release_guard_covers_these_files(self):
         """守卫读的必须是这份清单，不能又在别处硬编码一份。"""
         self.assertIs(
@@ -171,6 +182,50 @@ class InstalledCopyCanSelfTestTest(unittest.TestCase):
             self.assertEqual(t.returncode, 0,
                              f"装出来的副本自测没过：\n{t.stderr[-3000:]}")
             self.assertIn("OK", t.stderr)
+
+    @requires_build_release
+    def test_copy_installed_from_the_zip_can_also_self_test(self):
+        """
+        🔴 补的是一个真实的覆盖盲区。
+
+        上面那条走的是 **bootstrap 从开发树装**，而开发树里有
+        `scripts/build_release.py`；zip 却把它排除掉了（它是开发工具）。
+        于是两条路装出来的文件集不同，而只有 zip 那条会因为
+        `tests/` 里硬 import build_release 而报 ImportError ——
+        **业务拿到的正是 zip 那份**，点一下自测就是两条红色错误。
+
+        这个盲区能藏住，就是因为当时只测了 bootstrap 那条路。
+        """
+        import zipfile
+        with tempfile.TemporaryDirectory(prefix="fg-zip-") as d:
+            base = Path(d)
+            dist = base / "dist"
+            build_release.build(dist)
+
+            extract = base / "extract"
+            with zipfile.ZipFile(dist / "followup-genie-agent.zip") as z:
+                z.extractall(extract)
+            pkg = extract / "followup-genie"
+
+            self.assertFalse((pkg / "scripts" / "build_release.py").exists(),
+                             "打包工具本来就不该进包")
+
+            ws = base / "ws"
+            r = subprocess.run(
+                [sys.executable, str(pkg / "scripts" / "bootstrap.py"),
+                 "--host", "workbuddy", "--workspace", str(ws)],
+                capture_output=True, text=True, timeout=600,
+                env={"PATH": "/usr/bin:/bin", "HOME": d})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+            skill = ws / ".followup-genie"
+            t = subprocess.run(
+                ["bash", str(skill / "run_tests.sh")],
+                capture_output=True, text=True, cwd=str(skill), timeout=900,
+                env={"PATH": "/usr/bin:/bin", "HOME": d, "FG_NESTED_TEST": "1"})
+            self.assertEqual(
+                t.returncode, 0,
+                f"🔴 从 zip 装出来的副本自测没过：\n{t.stderr[-3000:]}")
 
     def test_installed_file_set_matches_manifest(self):
         with tempfile.TemporaryDirectory(prefix="fg-set-") as d:

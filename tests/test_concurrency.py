@@ -282,7 +282,18 @@ class RealRaceTest(unittest.TestCase):
     ROUNDS = 15
 
     def _race(self, home, prep=None):
-        """起 PROCS 个进程同时抢锁，返回结果列表。"""
+        """
+        起 PROCS 个进程同时抢锁，返回结果列表。
+
+        🔴 `hold=True` 是必须的，不是可选项。
+
+        worker 若拿到锁就立刻释放，那么「一轮里有几个 ok」根本不是互斥的
+        度量 —— A 拿到、A 释放、D 再拿到，两个 ok 但**全程只有一个持有者**，
+        完全合法。实测确实会偶发（两条 busy 指向同一个 pid、且没有夺锁告警，
+        就是这种情况）。
+
+        让赢家**攥着不放**，「恰好一个 ok」才真正等价于「同一时刻只有一个持有者」。
+        """
         import multiprocessing as mp
         import lockworker
 
@@ -292,12 +303,15 @@ class RealRaceTest(unittest.TestCase):
             lock = home / "followup" / "state" / core.LOCK_FILE
             if lock.exists():
                 lock.unlink()
+            for m in (home / "followup" / "state").glob(f"{core.LOCK_FILE}.steal.*"):
+                m.unlink()
             if prep:
                 prep(home)
 
             barrier = ctx.Barrier(self.PROCS)
             queue = ctx.Queue()
-            procs = [ctx.Process(target=lockworker.grab, args=(barrier, queue))
+            procs = [ctx.Process(target=lockworker.grab,
+                                 args=(barrier, queue, True))
                      for _ in range(self.PROCS)]
             for p in procs:
                 p.start()
