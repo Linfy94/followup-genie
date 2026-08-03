@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `0.3.0-rc2` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
+> `0.3.0-rc3` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
 
 ## 给业务：只复制下面这一段
 
@@ -272,7 +272,7 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 
 ## 已知边界
 
-见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.3.0-rc2` 的主要限制：
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.3.0-rc3` 的主要限制：
 WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**。
 
 ---
