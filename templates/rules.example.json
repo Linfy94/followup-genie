@@ -96,12 +96,12 @@
 
   "workday": {
     "exclude_weekends": true,
-    "exclude_holidays": false,
+    "exclude_holidays": true,
     "_exclude_holidays说明": [
-      "只有当某个节点用了 {\"workdays\": N} 才需要关心这个。",
-      "改成 true 需要维护 config/holidays.json（每年更新一次，调休安排无法用规则推算）。",
+      "每日调度会用它决定法定节假日不发、调休补班日照发。",
+      "必须维护 config/holidays.json（每年更新一次，调休安排无法用规则推算）。",
       "表过期时会报警，不会静默退化成只排周末。",
-      "如果觉得不值得维护，保持 false 是合理取舍，不是降级。"
+      "0.4.0-rc3 首次安装自带已核对的 2026 年预设，升级不覆盖已有表。"
     ]
   }
 }

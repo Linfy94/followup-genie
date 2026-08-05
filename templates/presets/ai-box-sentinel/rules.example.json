@@ -1,0 +1,22 @@
+{
+  "_说明": "脱敏示例；AI 节能盒子阈值保留已确认业务口径。",
+  "rulesets": {
+    "box": {"nodes": [
+      {"id": "collect", "name": "①收资", "stage": "待收资", "enabled": true, "when": [{"field": "技术评估", "op": "in", "values": ["待收资"]}], "clock": {"field": "需求上报日期"}, "threshold": {"days": 7, "boundary": "on"}, "repeat": {"days": 7}},
+      {"id": "expert", "name": "②专家评估", "stage": "待专家评估", "enabled": true, "when": [{"field": "技术评估", "op": "empty"}], "clock": {"field": "需求上报日期"}, "threshold": {"days": 3, "boundary": "after"}, "repeat": {"workdays": 2}},
+      {"id": "install", "name": "③预调试/安装", "stage": "预调试/安装", "enabled": true, "when": [{"field": "技术评估", "op": "in", "values": ["可行", "需预调试", "有条件可行"]}, {"field": "安装调试", "op": "empty"}], "clock": {"stage_entered": true, "fallback": ["最新进展日期", "需求上报日期"]}, "threshold": {"days": 21, "boundary": "after"}, "repeat": {"days": 7}},
+      {"id": "efficiency_test", "name": "④节能测试", "stage": "节能测试", "enabled": true, "when": [{"field": "安装调试", "op": "equals", "value": "完成"}, {"field": "节能测试", "op": "not_equals", "value": "完成"}], "clock": {"stage_entered": true, "fallback": ["最新进展日期", "需求上报日期"]}, "threshold": {"days": 21, "boundary": "after"}, "repeat": {"days": 7}},
+      {"id": "report", "name": "⑤汇报", "stage": "汇报", "enabled": true, "when": [{"field": "节能测试", "op": "equals", "value": "完成"}, {"field": "节能汇报", "op": "not_equals", "value": "完成"}], "clock": {"stage_entered": true, "fallback": ["最新进展日期", "需求上报日期"]}, "threshold": {"days": 30, "boundary": "after"}, "repeat": {"days": 7}}
+    ]},
+    "sentinel_qq": {"nodes": [
+      {"id": "fill_form", "name": "①客户填表", "stage": "待客户填表", "enabled": true, "when": [{"field": "当前状态", "op": "equals", "value": "待客户填表"}], "clock": {"field": "需求提出时间"}, "threshold": {"days": 7, "boundary": "on"}, "repeat": {"days": 7}},
+      {"id": "expert_review", "name": "②专家确认方案", "stage": "待专家评估", "enabled": true, "when": [{"field": "当前状态", "op": "equals", "value": "待专家评估"}], "clock": {"stage_entered": true, "fallback": ["最新进展日期", "需求提出时间"]}, "threshold": {"workdays": 2, "boundary": "after"}, "repeat": {"workdays": 2}},
+      {"id": "branch_register", "name": "③分行扫码登记", "stage": "待登记飞书", "enabled": true, "when": [{"field": "当前状态", "op": "equals", "value": "待登记飞书"}], "clock": {"stage_entered": true, "fallback": ["最新进展日期", "需求提出时间"]}, "threshold": {"workdays": 3, "boundary": "after"}, "repeat": {"days": 1}, "cross_ledger": {"ledger_id": "sentinel_lark", "match_fields": [{"local_field": "企业名称", "target_field": "企业名称"}, {"local_field": "分行", "target_field": "分行/地区", "normalize_map": {"杭州": "杭州", "杭州分行": "杭州", "深圳": "深圳", "深圳分行": "深圳"}}]}}
+    ]},
+    "sentinel_lark": {"nodes": [
+      {"id": "ship", "name": "④发货", "stage": "待发货", "enabled": true, "when": [{"field": "AI哨兵发货表", "op": "empty"}], "clock": {"field": "立项时间"}, "threshold": {"days": 0, "boundary": "on"}, "repeat": {"weekday": "Wed"}},
+      {"id": "install", "name": "⑤安装", "stage": "待安装", "enabled": true, "when": [{"field": "AI哨兵发货表", "op": "not_empty"}, {"field": "安装情况", "op": "not_contains", "value": "已完成"}], "clock": {"stage_entered": true, "fallback": "立项时间"}, "threshold": {"days": 7, "boundary": "after"}, "repeat": {"days": 7}}
+    ]}
+  },
+  "workday": {"exclude_weekends": true, "exclude_holidays": true}
+}

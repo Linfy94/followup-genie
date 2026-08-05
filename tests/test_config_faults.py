@@ -146,6 +146,23 @@ class FieldTypeTest(unittest.TestCase):
         self.assertEqual(r.code, 2)
         self.assertIn("boundary", r.err)
 
+    def test_invalid_clock_fallback_types_are_rejected(self):
+        bad_values = (123, {"field": "最新进展日期"},
+                      ["最新进展日期", 123])
+        for bad in bad_values:
+            with self.subTest(fallback=bad):
+                rules = rules_cfg()
+                install = next(
+                    node for node in rules["rulesets"]["box"]["nodes"]
+                    if node["id"] == "install"
+                )
+                install["clock"]["fallback"] = bad
+                r = self._run_bad(rules=rules)
+                self.assertEqual(r.code, 2)
+                self.assertIn("clock.fallback 必须是非空字符串", r.err)
+                self.assertNotIn("Traceback", r.err)
+                self.assertNotIn("TypeError", r.err)
+
     def test_output_segment_is_a_string(self):
         cfg = output_cfg()
         cfg["wecom_webhook"] = "https://example.com"

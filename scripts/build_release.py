@@ -41,10 +41,35 @@ SENSITIVE_CONTENT = (
     re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(rb"qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?key=[A-Za-z0-9_-]{16,}"),
 )
+ORGANIZATION_RE = re.compile(
+    r"[\u3400-\u9fff]{2,60}(?:有限责任公司|股份有限公司|有限公司|集团|医院|酒店|合作社)"
+)
 
 
 class BuildError(RuntimeError):
     pass
+
+
+def unapproved_organizations(data: bytes) -> list[str]:
+    """找出未登记的组织名；非 UTF-8 文件由其他敏感规则检查。"""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return []
+    # 先移除已登记的完整名称，避免连在中文语句中时向前贪婪。
+    for name in sorted(_manifest.ALLOWED_EXAMPLE_ORGANIZATIONS,
+                       key=len, reverse=True):
+        text = text.replace(name, "")
+    return sorted(set(ORGANIZATION_RE.findall(text)))
+
+
+def validate_organization_names(data: bytes, relative: str) -> None:
+    names = unapproved_organizations(data)
+    if names:
+        raise BuildError(
+            f"发现未登记的组织名，疑似真实客户内容：{relative}："
+            + "、".join(names)
+        )
 
 
 def version() -> str:
@@ -113,6 +138,7 @@ def validate_contents(files: list[Path], release_version: str) -> None:
         for pattern in SENSITIVE_CONTENT:
             if pattern.search(data):
                 raise BuildError(f"疑似敏感内容，停止打包：{relative}")
+        validate_organization_names(data, relative.as_posix())
 
     stale = []
     for name in _manifest.VERSION_STAMPED_FILES:
@@ -177,6 +203,7 @@ def verify_archive(path: Path, expected_files: list[Path]) -> None:
             for pattern in SENSITIVE_CONTENT:
                 if pattern.search(data):
                     raise BuildError(f"压缩包内疑似敏感内容：{name}")
+            validate_organization_names(data, name)
 
 
 def build(output_dir: Path) -> list[Path]:

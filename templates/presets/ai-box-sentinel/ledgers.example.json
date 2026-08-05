@@ -1,0 +1,57 @@
+{
+  "_说明": "脱敏示例。必须由 Agent 询问业务后填入真实地址与责任范围；不得猜测。",
+  "ledgers": [
+    {
+      "id": "box",
+      "name": "AI节能盒子项目登记册",
+      "line": "box",
+      "display_name": "AI节能盒子",
+      "enabled": true,
+      "source": "tencent_mcp",
+      "file_id": "由业务提供",
+      "sheet_id": "由业务提供",
+      "ruleset": "box",
+      "key_field": "序号",
+      "name_field": "项目名称",
+      "required_columns": ["序号", "地点", "项目名称", "需求上报日期", "最新进展日期", "技术评估", "安装调试", "节能测试", "节能汇报", "项目状态", "备注"],
+      "scope_filters": [{"field": "地点", "op": "in", "values": ["由业务确认"]}],
+      "terminal_column": {"enabled": true, "field": "项目状态", "truthy_values": ["终止"]},
+      "terminal_states": [], "terminal_note_phrases": [], "terminal_note_exceptions": [], "paused": [], "gray_list_for_review": []
+    },
+    {
+      "id": "sentinel_qq",
+      "name": "AI哨兵前期台账",
+      "line": "sentinel",
+      "display_name": "AI哨兵",
+      "enabled": true,
+      "source": "tencent_mcp",
+      "file_id": "由业务提供",
+      "sheet_id": "由业务提供",
+      "ruleset": "sentinel_qq",
+      "key_field": "企业名称",
+      "name_field": "企业名称",
+      "required_columns": ["企业名称", "分行", "需求提出时间", "当前状态", "最新进展日期", "备注"],
+      "scope_filters": [{"field": "分行", "op": "in", "values": ["由业务确认"]}],
+      "terminal_states": [{"field": "当前状态", "op": "contains", "value": "终止"}],
+      "terminal_note_exceptions": [], "paused": [], "gray_list_for_review": []
+    },
+    {
+      "id": "sentinel_lark",
+      "name": "AI哨兵飞书主台账",
+      "line": "sentinel",
+      "display_name": "AI哨兵",
+      "enabled": true,
+      "source": "lark_cli",
+      "base_token": "由业务提供",
+      "table_id": "由业务提供",
+      "profile": "由业务确认",
+      "ruleset": "sentinel_lark",
+      "key_field": "_record_id",
+      "name_field": "企业名称",
+      "required_columns": ["_record_id", "企业名称", "分行/地区", "项目状态", "安装情况", "AI哨兵发货表", "立项时间"],
+      "scope_filters": [{"field": "分行/地区", "op": "in", "values": ["由业务确认"]}],
+      "terminal_states": [{"field": "项目状态", "op": "contains", "value": "已终止"}],
+      "terminal_note_exceptions": [], "paused": [], "gray_list_for_review": []
+    }
+  ]
+}

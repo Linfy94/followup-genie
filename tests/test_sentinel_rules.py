@@ -170,6 +170,74 @@ class CrossLedgerTest(unittest.TestCase):
         self.assertNotIn("已登记公司", names_due)
         self.assertIn("未登记公司", names_due, "没出现在目标台账，超期了就该催")
 
+    def _run_joint(self, target_rows, *, target_scope=True):
+        source_sheet = FakeSheet(
+            ["企业名称", "分行", "状态", "进入时间"],
+            [{"企业名称": "同名企业", "分行": "杭州",
+              "状态": "待登记", "进入时间": D}],
+        )
+        target_sheet = FakeSheet(["企业名称", "分行/地区"], target_rows)
+        source = base_ledger(id="src",
+                             required_columns=["企业名称", "分行", "状态", "进入时间"])
+        target = base_ledger(
+            id="tgt", name="目标台账", required_columns=["企业名称", "分行/地区"],
+            scope_filters=([{"field": "分行/地区", "op": "in",
+                            "values": ["杭州分行", "深圳分行"]}]
+                           if target_scope else []),
+        )
+        ruleset = {"nodes": [{
+            "id": "wait_reg", "name": "待登记", "enabled": True,
+            "when": [{"field": "状态", "op": "equals", "value": "待登记"}],
+            "clock": {"field": "进入时间"},
+            "threshold": {"days": 3, "boundary": "after"},
+            "repeat": {"days": 1},
+            "cross_ledger": {
+                "ledger_id": "tgt",
+                "match_fields": [
+                    {"local_field": "企业名称", "target_field": "企业名称"},
+                    {"local_field": "分行", "target_field": "分行/地区",
+                     "normalize_map": {"杭州": "杭州", "杭州分行": "杭州",
+                                       "深圳": "深圳", "深圳分行": "深圳"}},
+                ],
+            },
+        }]}
+        sheets = {"src": source_sheet, "tgt": target_sheet}
+        wd = core.WorkdayCalc({"exclude_weekends": True,
+                               "exclude_holidays": False}, None)
+        with mock.patch.object(core, "read_ledger_sheet",
+                               side_effect=lambda ledger: sheets[ledger["id"]]):
+            return core.evaluate_ledger(
+                source, ruleset, wd, D + timedelta(days=10), {}, {}, {},
+                all_ledgers={"src": source, "tgt": target})[0]
+
+    def test_same_company_different_branch_does_not_advance(self):
+        rep = self._run_joint([
+            {"企业名称": "同名企业", "分行/地区": "深圳分行"},
+        ])
+        self.assertEqual(len(rep.advanced), 0)
+        self.assertEqual(len(rep.due), 1)
+
+    def test_out_of_scope_target_does_not_advance(self):
+        rep = self._run_joint([
+            {"企业名称": "同名企业", "分行/地区": "宁波分行"},
+        ])
+        self.assertEqual(len(rep.advanced), 0)
+        self.assertEqual(len(rep.due), 1)
+
+    def test_normalized_joint_identity_advances(self):
+        rep = self._run_joint([
+            {"企业名称": "同名企业", "分行/地区": "杭州分行"},
+        ])
+        self.assertEqual(len(rep.advanced), 1)
+        self.assertEqual(len(rep.due), 0)
+
+    def test_ambiguous_joint_identity_stays_due_and_is_reviewed(self):
+        rows = [{"企业名称": "同名企业", "分行/地区": "杭州分行"}] * 2
+        rep = self._run_joint(rows)
+        self.assertEqual(len(rep.advanced), 0)
+        self.assertEqual(len(rep.due), 1)
+        self.assertTrue(any("命中 2 条" in hint for hint in rep.review_hints))
+
     def test_missing_all_ledgers_raises_instead_of_silently_never_matching(self):
         """不给 all_ledgers 时必须报错，不能悄悄当成"永远没查到"从而永远催下去。"""
         src, tgt, ruleset, sheets = self._ledgers_and_sheets()

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import json
 import stat
 import pathlib
 import subprocess
@@ -60,15 +61,36 @@ class SetupScriptTest(unittest.TestCase):
                     (runtime / "followup" / "config" / f"{name}.json").is_file()
                 )
 
+            holiday_file = runtime / "followup" / "config" / "holidays.json"
+            holidays = json.loads(holiday_file.read_text(encoding="utf-8"))
+            self.assertTrue(holidays["verified"])
+            self.assertEqual(holidays["covers_year"], 2026)
+            self.assertEqual(len(holidays["holidays"]), 33)
+            self.assertEqual(len(holidays["workdays"]), 6)
+            rules = json.loads(
+                (runtime / "followup" / "config" / "rules.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertTrue(rules["workday"]["exclude_holidays"])
+
             ledgers = runtime / "followup" / "config" / "ledgers.json"
             sentinel = ledgers.read_text(encoding="utf-8") + "\n"
             ledgers.write_text(sentinel, encoding="utf-8")
+            holiday_sentinel = b'{"business_override": true}\n'
+            holiday_file.write_bytes(holiday_sentinel)
+            state_file = runtime / "followup" / "state" / "business-state.json"
+            state_file.write_bytes(b"keep-state\n")
             env_file = runtime / ".env"
+            env_file.write_bytes(b"KEEP_SECRET=fake-but-preserved\n")
+            env_sentinel = env_file.read_bytes()
             env_file.chmod(0o644)
 
             second = run(["bash", "scripts/setup.sh"], env=env)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(ledgers.read_text(encoding="utf-8"), sentinel)
+            self.assertEqual(holiday_file.read_bytes(), holiday_sentinel)
+            self.assertEqual(state_file.read_bytes(), b"keep-state\n")
+            self.assertEqual(env_file.read_bytes(), env_sentinel)
             self.assertEqual(
                 stat.S_IMODE(env_file.stat().st_mode),
                 0o600,

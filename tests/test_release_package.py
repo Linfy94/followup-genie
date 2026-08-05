@@ -7,12 +7,14 @@ from __future__ import annotations
 import hashlib
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +55,52 @@ class SkillMetadataTest(unittest.TestCase):
 
 @requires_build_release
 class ReleasePackageTest(unittest.TestCase):
+
+    def test_release_rejects_unregistered_organization_name(self):
+        """不只测正则：往待打包文件塞一个客户名，完整 build() 必须失败。"""
+        with tempfile.TemporaryDirectory(prefix="release-leak-") as raw:
+            clone = Path(raw) / "source"
+            shutil.copytree(ROOT, clone, ignore=shutil.ignore_patterns(".git"))
+            leak = clone / "tests" / "test_privacy_leak.py"
+            customer = "真实客户科技" + "有限公司"
+            leak.write_text(f'CUSTOMER = "{customer}"\n', encoding="utf-8")
+            with mock.patch.object(build_release, "ROOT", clone):
+                with self.assertRaisesRegex(build_release.BuildError,
+                                            "未登记的组织名"):
+                    build_release.build(Path(raw) / "dist")
+
+    def test_registered_examples_are_allowed(self):
+        data = "\n".join(sorted(
+            build_release._manifest.ALLOWED_EXAMPLE_ORGANIZATIONS
+        )).encode("utf-8")
+        self.assertEqual(build_release.unapproved_organizations(data), [])
+
+    def test_zip_and_skill_each_install_in_isolation(self):
+        with tempfile.TemporaryDirectory(prefix="release-formats-") as raw:
+            base = Path(raw)
+            output = base / "dist"
+            build_release.build(output)
+            for filename in ("followup-genie-agent.zip",
+                             "followup-genie-workbuddy.skill"):
+                with self.subTest(filename=filename):
+                    extract = base / f"extract-{Path(filename).suffix[1:]}"
+                    with zipfile.ZipFile(output / filename) as archive:
+                        archive.extractall(extract)
+                    workspace = base / f"workspace-{Path(filename).suffix[1:]}"
+                    env = os.environ.copy()
+                    env.pop("FOLLOWUP_HOME", None)
+                    env.pop("HERMES_HOME", None)
+                    result = subprocess.run(
+                        [sys.executable,
+                         str(extract / "followup-genie" / "scripts" / "bootstrap.py"),
+                         "--host", "workbuddy", "--workspace", str(workspace)],
+                        cwd=str(extract / "followup-genie"), env=env, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        (workspace / ".followup-genie" / "VERSION")
+                        .read_text(encoding="utf-8").strip(), VERSION)
 
     def test_build_hashes_contents_and_install_from_archive(self):
         with tempfile.TemporaryDirectory(prefix="release 输出 ") as raw:

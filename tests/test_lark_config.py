@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from harness import core, make_sheet, row  # noqa: F401 —— 也为挂 sys.path
 
@@ -177,6 +178,29 @@ class CrossLedgerRefTest(unittest.TestCase):
         e = errors([lark_ledger()], self.rules("sentinel_lark"))
         self.assertTrue(any("应该是对象" in x for x in e), e)
 
+    def test_valid_multi_field_reference_passes(self):
+        cross = {
+            "ledger_id": "qq",
+            "match_fields": [
+                {"local_field": "企业名称", "target_field": "企业名称"},
+                {"local_field": "分行", "target_field": "分行/地区",
+                 "normalize_map": {"杭州": "杭州", "杭州分行": "杭州"}},
+            ],
+        }
+        e = errors([lark_ledger(), lark_ledger(id="qq", name="前期台账")],
+                   self.rules(cross))
+        self.assertEqual(e, [])
+
+    def test_mixed_or_invalid_match_fields_are_rejected(self):
+        for value in ({}, [], ["企业名称"],
+                      [{"local_field": "企业名称"}],
+                      [{"local_field": "企业名称", "target_field": "企业名称",
+                        "normalize_map": {"杭州": 1}}]):
+            with self.subTest(value=value):
+                e = errors([lark_ledger()], self.rules({
+                    "ledger_id": "sentinel_lark", "match_fields": value}))
+                self.assertTrue(any("cross_ledger 配置无效" in x for x in e), e)
+
 
 class CrossLedgerFieldMustExistTest(unittest.TestCase):
     """
@@ -208,12 +232,41 @@ class CrossLedgerFieldMustExistTest(unittest.TestCase):
         orig = core.read_ledger_sheet
         core.read_ledger_sheet = lambda l: sheet
         try:
-            vals = core._cross_ledger_values(
+            index, specs = core._cross_ledger_values(
                 {"ledger_id": "qq", "target_field": "项目名称"},
                 {"qq": target}, {})
         finally:
             core.read_ledger_sheet = orig
-        self.assertEqual(vals, {"甲公司", "乙公司"})
+        self.assertEqual(index, {("甲公司",): 1, ("乙公司",): 1})
+        self.assertEqual(specs[0]["target_field"], "项目名称")
+
+    def test_scope_filter_is_applied_before_indexing(self):
+        target = {"id": "qq", "name": "前期台账", "source": "tencent_mcp",
+                  "name_field": "项目名称",
+                  "scope_filters": [{"field": "地点", "op": "equals", "value": "杭州"}]}
+        sheet = make_sheet([
+            row(1, "范围内公司", place="杭州"),
+            row(2, "范围外公司", place="宁波"),
+        ])
+        with mock.patch.object(core, "read_ledger_sheet", return_value=sheet):
+            index, _ = core._cross_ledger_values(
+                {"ledger_id": "qq", "target_field": "项目名称"},
+                {"qq": target}, {})
+        self.assertEqual(index, {("范围内公司",): 1})
+
+    def test_cache_key_includes_target_fields(self):
+        target = {"id": "qq", "name": "前期台账", "source": "tencent_mcp",
+                  "name_field": "项目名称"}
+        sheet = make_sheet([row(1, "甲公司", place="杭州")])
+        cache = {}
+        with mock.patch.object(core, "read_ledger_sheet", return_value=sheet) as read:
+            names, _ = core._cross_ledger_values(
+                {"ledger_id": "qq", "target_field": "项目名称"}, {"qq": target}, cache)
+            regions, _ = core._cross_ledger_values(
+                {"ledger_id": "qq", "target_field": "地点"}, {"qq": target}, cache)
+        self.assertEqual(names, {("甲公司",): 1})
+        self.assertEqual(regions, {("杭州",): 1})
+        self.assertEqual(read.call_count, 2)
 
 
 class PureLarkNeedsNoTencentTokenTest(unittest.TestCase):

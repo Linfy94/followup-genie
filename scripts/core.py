@@ -202,6 +202,41 @@ def _validate_link_date_fields(l: dict, where: str) -> list[str]:
     return errs
 
 
+def cross_match_fields(cfg: dict, default_local: str = "项目名称") -> list[dict]:
+    """规整 cross_ledger 新旧两种字段配置；无效结构抛出人话 ValueError。"""
+    raw = cfg.get("match_fields")
+    if raw is None:
+        local = cfg.get("match_field") or default_local
+        target = cfg.get("target_field") or cfg.get("match_field")
+        if not target:
+            raise ValueError("既没有 match_fields，也没有 target_field/match_field")
+        return [{"local_field": local, "target_field": target,
+                 "normalize_map": {}}]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("match_fields 必须是非空数组")
+    result = []
+    for index, spec in enumerate(raw, 1):
+        if not isinstance(spec, dict):
+            raise ValueError(f"match_fields 第 {index} 项必须是对象")
+        local = spec.get("local_field")
+        target = spec.get("target_field")
+        if not isinstance(local, str) or not local.strip():
+            raise ValueError(f"match_fields 第 {index} 项缺少 local_field")
+        if not isinstance(target, str) or not target.strip():
+            raise ValueError(f"match_fields 第 {index} 项缺少 target_field")
+        normalizer = spec.get("normalize_map") or {}
+        if not isinstance(normalizer, dict) or any(
+                not isinstance(key, str) or not key
+                or not isinstance(value, str) or not value
+                for key, value in normalizer.items()):
+            raise ValueError(
+                f"match_fields 第 {index} 项的 normalize_map 必须是非空字符串到非空字符串的对象")
+        result.append({"local_field": local.strip(),
+                       "target_field": target.strip(),
+                       "normalize_map": dict(normalizer)})
+    return result
+
+
 def _validate_cross_refs(l: dict, rules: dict, known_ids: set) -> list[str]:
     """cross_ledger 指向的台账必须真实存在（字段是否存在要等读到表才知道）。"""
     errs: list[str] = []
@@ -227,9 +262,10 @@ def _validate_cross_refs(l: dict, rules: dict, known_ids: set) -> list[str]:
                 f"节点「{node}」的 cross_ledger 指向 ledger_id={target!r}，"
                 f"但 ledgers.json 里没有这个 id（现有：{sorted(known_ids)}）。"
                 f"跨台账核对查不到目标台账时这个节点会永远催下去。")
-        if not (cross.get("target_field") or cross.get("match_field")):
-            errs.append(f"节点「{node}」的 cross_ledger 既没有 target_field "
-                        f"也没有 match_field，不知道拿哪一列去对")
+        try:
+            cross_match_fields(cross, l.get("name_field", "项目名称"))
+        except ValueError as exc:
+            errs.append(f"节点「{node}」的 cross_ledger 配置无效：{exc}")
     return errs
 
 
@@ -304,6 +340,20 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
                     errs.append(f"{where}应该是对象，实际是{_type_name(n)}")
                     continue
                 where = f"节点「{n.get('name') or n.get('id') or j + 1}」"
+                clock = n.get("clock") or {}
+                fallback = clock.get("fallback") if isinstance(clock, dict) else None
+                if fallback is not None:
+                    valid = (
+                        isinstance(fallback, str) and bool(fallback.strip())
+                    ) or (
+                        isinstance(fallback, list) and bool(fallback)
+                        and all(isinstance(value, str) and bool(value.strip())
+                                for value in fallback)
+                    )
+                    if not valid:
+                        errs.append(
+                            f"{where}的 clock.fallback 必须是非空字符串或非空字符串数组，"
+                            f"实际是 {fallback!r}")
                 thr = n.get("threshold")
                 if thr is None:
                     continue          # 未启用的节点可以没有阈值，doctor 另有检查
@@ -1184,13 +1234,16 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         if node.get("enabled"):
             referenced |= referenced_fields(node.get("when") or [])
             clock = node.get("clock") or {}
-            for k in ("field", "fallback"):
-                if clock.get(k):
-                    referenced.add(clock[k])
+            if clock.get("field"):
+                referenced.add(clock["field"])
+            referenced.update(clock_fallback_fields(clock))
             cross = node.get("cross_ledger") or {}
-            local_field = cross.get("match_field")
-            if local_field:
-                referenced.add(local_field)
+            if cross:
+                try:
+                    for spec in cross_match_fields(cross, name_field):
+                        referenced.add(spec["local_field"])
+                except ValueError:
+                    pass  # validate_configs 已给出精确错误；避免这里二次裸崩
     for f in ledger.get("scope_filters") or []:
         if f.get("field"):
             referenced.add(f["field"])
@@ -1234,9 +1287,10 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     date_fields = set()
     for node in ruleset.get("nodes", []):
         clock = node.get("clock") or {}
-        for k in ("field", "fallback"):
-            if clock.get(k):
-                date_fields.add(clock[k])
+        # 固定日期列仍做逐列质量提示。fallback 是一组候选字段，不能逐列说
+        # “为空就会跳过”；实际只有整组都不可用时才会在当前节点报无起点。
+        if clock.get("field"):
+            date_fields.add(clock["field"])
     for f in sorted(date_fields):
         # 🔴 「该列为空」和「有内容但解析不出日期」必须分开说。
         #    合起来报「N 行无法解析为日期」会把「业务还没填」说成故障 ——
@@ -1465,6 +1519,11 @@ class Report:
                 + len(self.paused) + len(self.advanced) + self.out_of_scope
                 + self.no_node + self.not_overdue)
 
+    @property
+    def in_scope_rows(self) -> int:
+        """责任范围内行数；不改变 total_rows/accounted 的逐台账核对。"""
+        return max(self.total_rows - self.out_of_scope, 0)
+
 
 def judge_terminal(get_text, ledger: dict, key: str) -> str | None:
     """
@@ -1506,6 +1565,16 @@ def judge_terminal(get_text, ledger: dict, key: str) -> str | None:
     return None
 
 
+def clock_fallback_fields(clock: dict) -> list[str]:
+    """返回已通过配置校验的 fallback 字段，非法值防御性地返回空数组。"""
+    fallback = clock.get("fallback")
+    if isinstance(fallback, str):
+        return [fallback.strip()] if fallback.strip() else []
+    if isinstance(fallback, list) and all(isinstance(value, str) for value in fallback):
+        return [value.strip() for value in fallback if value.strip()]
+    return []
+
+
 def resolve_clock(node: dict, get_text, get_date, stage_entered: dict,
                   state_key: str, last_snapshot_date: date | None,
                   last_snapshot_node: str | None, node_id: str) -> tuple[date | None, str]:
@@ -1533,8 +1602,15 @@ def resolve_clock(node: dict, get_text, get_date, stage_entered: dict,
     if not clock.get("stage_entered"):
         raise LedgerError(f"节点「{node.get('name')}」的 clock 配置无效")
 
-    fallback_field = clock.get("fallback")
-    fallback = get_date(fallback_field) if fallback_field else None
+    fallback_field, fallback = None, None
+    fallback_fields = clock_fallback_fields(clock)
+    for name in fallback_fields:
+        candidate = get_date(name)
+        if candidate:
+            fallback_field, fallback = name, candidate
+            break
+    if fallback_field is None:
+        fallback_field = "、".join(fallback_fields) if fallback_fields else None
 
     recorded = parse_iso(stage_entered.get(state_key))
     if recorded:
@@ -1607,16 +1683,30 @@ def read_ledger_sheet(ledger: dict):
     )
 
 
-def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict) -> set[str]:
-    """
-    取 cross_ledger 配置指向的目标台账、目标字段的全部取值（带缓存）。
+def _cross_identity(get_text, specs: list[dict], side: str) -> tuple[str, ...] | None:
+    """按配置生成联合身份；任一字段为空时不进行不可靠匹配。"""
+    values = []
+    for spec in specs:
+        field = spec[f"{side}_field"]
+        value = get_text(field).strip()
+        if not value:
+            return None
+        values.append(spec["normalize_map"].get(value, value))
+    return tuple(values)
 
-    缓存按 ledger_id 存在 evaluate_ledger 这一次调用范围内——同一目标台账
-    可能被多行、甚至多个节点引用，没有理由重复取数。
-    """
+
+def _cross_cache_key(lid: str, specs: list[dict]) -> tuple:
+    return (
+        lid,
+        tuple((spec["target_field"],
+               tuple(sorted(spec["normalize_map"].items()))) for spec in specs),
+    )
+
+
+def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict,
+                         default_local: str = "项目名称") -> tuple[dict, list[dict]]:
+    """建立目标责任范围内的联合身份索引，值为每个身份的命中次数。"""
     lid = cfg.get("ledger_id")
-    if lid in cache:
-        return cache[lid]
     target = (all_ledgers or {}).get(lid)
     if target is None:
         raise LedgerError(
@@ -1624,26 +1714,41 @@ def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict) -> set[str]:
             f"多台账核对必须能看到全部台账配置，不能静默当成「没查到」——"
             f"那会让这个节点永远催、永远不消失。"
         )
+    try:
+        specs = cross_match_fields(cfg, default_local)
+    except ValueError as exc:
+        raise LedgerError(f"跨台账核对配置无效：{exc}") from exc
+    cache_key = _cross_cache_key(lid, specs)
+    if cache_key in cache:
+        return cache[cache_key], specs
+
     target_sheet = read_ledger_sheet(target)
-    field = cfg.get("target_field") or cfg.get("match_field")
     name_field = target.get("name_field", "项目名称")
-    # 🔴 字段名写错 / 对方改了列名时，Sheet.text() 对每一行都返回 ""，
-    #    于是取值集合是空的 —— 「一条都没进主台账」，这个节点会永远催下去。
-    #    不报错、总数还对得上，是最难发现的那种坏法。必须在这里挡住。
-    for f, what in ((field, "target_field"), (name_field, "name_field")):
-        if not target_sheet.has_column(f):
+    required = {name_field}
+    required.update(spec["target_field"] for spec in specs)
+    required.update(f.get("field") for f in target.get("scope_filters") or []
+                    if f.get("field"))
+    for field in sorted(required):
+        if not target_sheet.has_column(field):
             raise LedgerError(
                 f"跨台账核对：目标台账「{target.get('name') or lid}」里没有"
-                f"名为「{f}」的列（{what}）。现有列：{[h for h in target_sheet.header if h][:20]}。\n"
+                f"名为「{field}」的列。现有列：{[h for h in target_sheet.header if h][:20]}。\n"
                 f"🔴 这不能当成「没查到」继续跑 —— 那会让这个节点永远催下去。"
             )
-    values = {
-        target_sheet.text(r, field) for r in target_sheet.data_rows
-        if target_sheet.text(r, name_field)
-    }
-    values.discard("")
-    cache[lid] = values
-    return values
+
+    index: dict[tuple[str, ...], int] = {}
+    for row in target_sheet.data_rows:
+        target_get = lambda field, _row=row: target_sheet.text(_row, field)  # noqa: E731
+        if not target_get(name_field):
+            continue
+        if any(not match_condition(target_get, condition)
+               for condition in target.get("scope_filters") or []):
+            continue
+        identity = _cross_identity(target_get, specs, "target")
+        if identity is not None:
+            index[identity] = index.get(identity, 0) + 1
+    cache[cache_key] = index
+    return index, specs
 
 
 def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
@@ -1664,7 +1769,7 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
     if stage_history is None:
         stage_history = {}
     rep = Report(ledger)
-    cross_cache: dict[str, set[str]] = {}
+    cross_cache: dict[tuple, dict] = {}
     sheet = read_ledger_sheet(ledger)
 
     a = assert_sheet(sheet, ledger, ruleset)
@@ -1750,12 +1855,18 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
         # 不管是不是在阈值窗口内查到的：迟到也是到了，不该继续催。
         cross_cfg = current.get("cross_ledger")
         if cross_cfg:
-            values = _cross_ledger_values(cross_cfg, all_ledgers or {}, cross_cache)
-            match_val = get_text(cross_cfg.get("match_field", name_field))
-            if match_val and match_val in values:
+            index, specs = _cross_ledger_values(
+                cross_cfg, all_ledgers or {}, cross_cache, name_field)
+            identity = _cross_identity(get_text, specs, "local")
+            matches = index.get(identity, 0) if identity is not None else 0
+            if matches == 1:
                 target_name = (all_ledgers or {}).get(cross_cfg.get("ledger_id"), {}).get("name", cross_cfg.get("ledger_id"))
                 rep.advanced.append((key, name, f"已出现在「{target_name}」"))
                 continue
+            if matches > 1:
+                rep.review_hints.append(
+                    f"{key} {name}：跨台账联合身份命中 {matches} 条，"
+                    f"无法确认是哪一个项目，未判定为已接力，继续催办")
 
         node_id = current["id"]
         snapshot[key] = node_id

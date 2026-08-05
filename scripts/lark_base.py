@@ -86,6 +86,20 @@ def _child_path(exe: str) -> str:
     return ":".join(out)
 
 
+AGENT_CONTEXT_VARS = ("HERMES_HOME", "OPENCLAW_HOME")
+
+
+def _child_env(exe: str) -> dict:
+    """构造外部 CLI 环境，剔除会触发 Agent 上下文绑定的变量。"""
+    env = dict(os.environ)
+    for name in AGENT_CONTEXT_VARS:
+        env.pop(name, None)
+    env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
+    env["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
+    env["PATH"] = _child_path(exe)
+    return env
+
+
 def _run_cli(subcommand: str, args: list[str]) -> dict:
     """调只读白名单内的一个 lark-cli base 子命令，返回解析后的 JSON 信封。"""
     if subcommand not in ALLOWED_SUBCOMMANDS:
@@ -119,10 +133,7 @@ def _run_cli(subcommand: str, args: list[str]) -> dict:
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=TIMEOUT,
-            env={"LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1",
-                 "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1",
-                 **_os_environ(),
-                 "PATH": _child_path(exe)},
+            env=_child_env(exe),
         )
     except FileNotFoundError as e:
         # 上面 exists() 过了还能走到这里：文件在但不可执行（权限/损坏的软链）
@@ -147,7 +158,7 @@ def _run_cli(subcommand: str, args: list[str]) -> dict:
 
 
 def _os_environ() -> dict:
-    import os
+    """已废弃；保留兼容，外部 CLI 必须改用 `_child_env()`。"""
     return dict(os.environ)
 
 

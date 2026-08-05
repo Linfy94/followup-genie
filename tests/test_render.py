@@ -121,6 +121,30 @@ class OrderingTest(unittest.TestCase):
         ])
         self.assertIn("积压最重：", render_both(two))
 
+    def test_merged_denominator_deducts_advanced_only_for_display(self):
+        """
+        两张哨兵台账合成一个区块；业务分母去掉已接力的重复项目，
+        但每张台账自身的 accounted == total_rows 护栏不变。
+        """
+        first = core.Report({"id": "sentinel_qq", "name": "前期台账",
+                             "line": "sentinel", "display_name": "AI哨兵"})
+        first.total_rows = 14
+        first.advanced.append(("已接力",))
+        first.no_node = 13
+        second = core.Report({"id": "sentinel_lark", "name": "飞书台账",
+                              "line": "sentinel", "display_name": "AI哨兵"})
+        second.total_rows = 83
+        second.no_node = 83
+
+        self.assertEqual(first.accounted, first.total_rows)
+        self.assertEqual(second.accounted, second.total_rows)
+        sections = check_followup.merge_reports([first, second])
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0].in_scope, 96)
+        out = check_followup.render([first, second], TODAY, False, output_cfg())
+        self.assertEqual(out.count("——AI哨兵——"), 1)
+        self.assertIn("总任务量：96 个项目里，0 个要催办", out)
+
 
 class TerminalHintTest(unittest.TestCase):
     """「超2个月 可考虑终止」分割线。"""

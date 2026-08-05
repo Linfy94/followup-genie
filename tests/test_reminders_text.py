@@ -6,7 +6,7 @@ macOS 提醒事项的文案。
 ═══════════════════════════════════════════════════════════════════════
 业务 2026-08-03 给的模板，并明确要求「不要太长」：
 
-    ⭕️AI外贸拓客「客户填表」深圳市永新能科技有限公司
+    ⭕️AI外贸拓客「客户填表」云帆示例能源有限公司
     超期（ ）天
     该做什么：提醒客户提交需求
 
@@ -36,7 +36,7 @@ from harness import core  # noqa: F401 —— 挂 sys.path
 import reminders_sync  # noqa: E402
 
 
-def item(*, name="深业集团有限公司", stage="节能测试", line_label="AI节能盒子",
+def item(*, name="星河示例科技有限公司", stage="节能测试", line_label="AI节能盒子",
          stalled=179, allowance=21, action="催节能测试出报告"):
     return core.Item(
         ledger_id="box", line="盒子", key="3", name=name,
@@ -53,21 +53,21 @@ class TitleFormatTest(unittest.TestCase):
     def test_matches_the_template(self):
         self.assertEqual(
             reminders_sync._title(item()),
-            "⭕️AI节能盒子「节能测试」深业集团有限公司")
+            "⭕️AI节能盒子「节能测试」星河示例科技有限公司")
 
     def test_another_line_and_stage(self):
         """换业务线、换阶段，形状不变 —— 业务举的例子就是外贸拓客那条线。"""
         self.assertEqual(
             reminders_sync._title(item(
                 line_label="AI外贸拓客", stage="客户填表",
-                name="深圳市永新能科技有限公司")),
-            "⭕️AI外贸拓客「客户填表」深圳市永新能科技有限公司")
+                name="云帆示例能源有限公司")),
+            "⭕️AI外贸拓客「客户填表」云帆示例能源有限公司")
 
     def test_stage_with_a_slash_survives(self):
         """「预调试/安装」带斜杠，别被当成路径或分隔符处理掉。"""
         self.assertEqual(
             reminders_sync._title(item(stage="预调试/安装")),
-            "⭕️AI节能盒子「预调试/安装」深业集团有限公司")
+            "⭕️AI节能盒子「预调试/安装」星河示例科技有限公司")
 
     def test_starts_with_the_marker(self):
         self.assertTrue(reminders_sync._title(item()).startswith(reminders_sync.MARKER))
@@ -146,7 +146,7 @@ class DryRunUsesNewTitleTest(unittest.TestCase):
                             {"reminders": {"write": False, "list_name": "测试列表"}},
                             date(2026, 8, 7), stream=buf)
         out = buf.getvalue()
-        self.assertIn("⭕️AI节能盒子「节能测试」深业集团有限公司", out)
+        self.assertIn("⭕️AI节能盒子「节能测试」星河示例科技有限公司", out)
         self.assertIn("演练模式", out)
         self.assertIn("未调用任何 osascript", out)
 

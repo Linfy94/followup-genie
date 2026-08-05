@@ -123,6 +123,8 @@ class VersionStampTest(unittest.TestCase):
         """写了当前版本还不够 —— 旧版本号残留同样会让人对不上账。"""
         pattern = re.compile(r"\b\d+\.\d+\.\d+(?:-rc\d+)?\b")
         for name in _manifest.VERSION_STAMPED_FILES:
+            if name in _manifest.VERSION_HISTORY_FILES:
+                continue
             text = (ROOT / name).read_text(encoding="utf-8")
             others = {m for m in pattern.findall(text) if m != self.version}
             self.assertEqual(others, set(),

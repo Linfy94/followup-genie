@@ -75,13 +75,13 @@ class SplitGuaranteeTest(unittest.TestCase):
         # 🔴 测试数据一律用虚构企业名。真实客户名进了仓库就等于把
         #    「这家公司是我们的项目、而且卡住了」写进版本历史，撤不回来。
         #    这两条测的是「中文不被劈成半个字」，名字是谁与断言无关。
-        text = "东海市城市建设投资集团有限公司" * 400
+        text = "东海市示例城市建设投资集团有限公司" * 400
         msgs = self.assert_within(text, 1000)
         for m in msgs:
             m.encode("utf-8").decode("utf-8")   # 能编解码就说明没劈坏
 
     def test_emoji_are_safe(self):
-        text = ("🧚 项目跟进精灵 · 南山区城市建设投资集团有限公司 "
+        text = ("🧚 项目跟进精灵 · 东海市示例城市建设投资集团有限公司 "
                 "— 停滞 123 天 ✅🔴⚠️\n") * 200
         msgs = self.assert_within(text, 2000)
         for m in msgs:

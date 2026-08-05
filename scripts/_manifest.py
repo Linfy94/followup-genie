@@ -76,14 +76,31 @@ EXCLUDED_SCRIPT_NAMES = frozenset({"build_release.py"})
 #    而当时的守卫只查 README 与 SKILL.md，一路放行。业务打开手册看到的
 #    是上一版的版本号 —— 版本号写错不会让程序崩，只会让人对不上账。
 #
-# KNOWN_ISSUES.md 刻意不在此列：它的「已在 0.2.0 系列修复」是**历史引用**，
-# 本来就该保留旧版本号。
 VERSION_STAMPED_FILES = (
+    "KNOWN_ISSUES.md",
     "README.md",
     "SKILL.md",
     "docs/WorkBuddy代理指令.md",
     "docs/业务操作手册-零基础版.md",
 )
+
+# 已知问题按版本记录历史修复，因此必须包含当前版本，
+# 但也允许出现旧版本作为历史引用。
+VERSION_HISTORY_FILES = frozenset({"KNOWN_ISSUES.md"})
+
+
+# 交付文件中允许出现的虚构组织全称。
+# 新增带「公司/集团/医院/酒店/合作社」后缀的测试名时，必须显式登记；
+# 未登记的名称会被 build_release.py 拦下。
+ALLOWED_EXAMPLE_ORGANIZATIONS = frozenset({
+    "东海市示例城市建设投资集团有限公司",
+    "同名企业有限公司",
+    "星河示例科技有限公司",
+    "云帆示例能源有限公司",
+    "某某生物技术股份有限公司",
+    "某某科技有限公司",
+    "某某酒店管理有限公司",
+})
 
 
 def should_skip(name: str) -> bool:

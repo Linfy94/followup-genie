@@ -157,7 +157,38 @@ def _fmt_share(n: int, total: int) -> str:
     return f"占 {round(r * 100)}%"
 
 
-def group_items(rep: core.Report, output_cfg: dict) -> list[dict]:
+class Section:
+    """给业务看的一节；同一业务线可以由多份台账拼成。"""
+
+    def __init__(self, label: str):
+        self.label = label
+        self.reports: list[core.Report] = []
+
+    @property
+    def items(self) -> list[core.Item]:
+        return [item for report in self.reports for item in report.due]
+
+    @property
+    def in_scope(self) -> int:
+        # advanced 的语义是源台账项目已在目标台账存在，因此给业务看的
+        # 合并分母扣掉源台账这一份；逐台账 total_rows/accounted 完全不动。
+        total = sum(report.in_scope_rows for report in self.reports)
+        duplicates = sum(len(report.advanced) for report in self.reports)
+        return max(total - duplicates, 0)
+
+
+def merge_reports(reports: list[core.Report]) -> list[Section]:
+    """按 display_name 合并展示，保持台账原有顺序。"""
+    sections: dict[str, Section] = {}
+    for report in reports:
+        section = sections.get(report.line_label)
+        if section is None:
+            section = sections[report.line_label] = Section(report.line_label)
+        section.reports.append(report)
+    return list(sections.values())
+
+
+def group_items(items: list, output_cfg: dict) -> list[dict]:
     """
     把待催清单分组排序，**两套渲染共用这一份**。
 
@@ -179,15 +210,15 @@ def group_items(rep: core.Report, output_cfg: dict) -> list[dict]:
     hint_days = int(hint.get("days") or 60)
     hint_text = hint.get("text") or "可考虑终止"
 
-    by_node: dict[str, list[core.Item]] = {}
-    for it in rep.due:
-        by_node.setdefault(it.node_name, []).append(it)
+    by_stage: dict[str, list[core.Item]] = {}
+    for it in items or []:
+        by_stage.setdefault(it.stage, []).append(it)
 
     groups = []
-    # 按 node_name 排序 = 按 ①②③④ 的编号顺序，与流程顺序一致
-    for node_name in sorted(by_node):
-        items = sorted(by_node[node_name], key=lambda x: x.overdue_days)
-        stage = items[0].stage
+    for stage in sorted(by_stage,
+                        key=lambda value: min(i.node_name for i in by_stage[value])):
+        items = sorted(by_stage[stage], key=lambda x: x.overdue_days)
+        node_name = min(i.node_name for i in items)
         cut = None
         # stages 为空数组 = 所有阶段都插；未配置该键则按「所有阶段」处理
         applies = hint_on and (not hint_stages or stage in hint_stages)
@@ -203,13 +234,13 @@ def group_items(rep: core.Report, output_cfg: dict) -> list[dict]:
     return groups
 
 
-def _headline(rep: core.Report, groups: list[dict]) -> list[str]:
-    """总任务量 + 积压最重。两套渲染共用。"""
-    lines = [f"总任务量：{rep.total_rows} 个项目里，{len(rep.due)} 个要催办"]
+def _headline(in_scope: int, due_count: int, groups: list[dict]) -> list[str]:
+    """责任范围内总任务量 + 积压最重。两套渲染共用。"""
+    lines = [f"总任务量：{in_scope} 个项目里，{due_count} 个要催办"]
     # 只有一个阶段时不说「积压最重」——那必然是 100%，等于没说
     if len(groups) > 1:
         worst = max(groups, key=lambda g: len(g["items"]))
-        share = _fmt_share(len(worst["items"]), len(rep.due))
+        share = _fmt_share(len(worst["items"]), due_count)
         lines.append(
             f"积压最重：{worst['stage']} {len(worst['items'])} 项"
             + (f"（{share}）" if share else "")
@@ -244,11 +275,11 @@ def render(reports: list[core.Report], today: date, write_on: bool,
     for w in (run_warnings or []):
         lines.append(f"⚠️ {w}")
 
-    for rep in reports:
-        groups = group_items(rep, output_cfg)
+    for section in merge_reports(reports):
+        groups = group_items(section.items, output_cfg)
         lines.append("")
-        lines.append(f"——{rep.line_label}——")
-        lines.extend(_headline(rep, groups))
+        lines.append(f"——{section.label}——")
+        lines.extend(_headline(section.in_scope, len(section.items), groups))
 
         for g in groups:
             lines.append("")
@@ -258,22 +289,27 @@ def render(reports: list[core.Report], today: date, write_on: bool,
                     lines.append(f"------- {g['hint_text']} -------")
                 lines.append(f"{i + 1}、{it.name} — 超期 {it.overdue_days} 天")
 
-        problems = _problems(rep)
-        if problems:
-            lines.append("")
-            for p in problems:
-                lines.append(f"⚠️ {p}")
+        for report in section.reports:
+            _render_report_tail(lines, report, verbose, write_on)
 
-        # 禁用的节点始终报一行 —— 一个悄悄不跑的规则比一个跑错的规则更难发现
-        for d in rep.disabled_nodes:
-            lines.append(f"⏸ {d.split('：')[0]}：未启用，不会产生催办")
+    return "\n".join(lines)
 
-        if not verbose:
-            continue
 
+def _render_report_tail(lines: list[str], rep: core.Report,
+                        verbose: bool, write_on: bool) -> None:
+    """渲染一份台账的故障、禁用节点和诊断摘要。"""
+    problems = _problems(rep)
+    if problems:
+        lines.append("")
+        for problem in problems:
+            lines.append(f"⚠️ {problem}")
+    for disabled in rep.disabled_nodes:
+        lines.append(f"⏸ {disabled.split('：')[0]}：未启用，不会产生催办")
+
+    if verbose:
         lines.append("")
         lines.append("─" * 46)
-        lines.append("◆ 运行摘要（--verbose）")
+        lines.append(f"◆ 运行摘要 · {rep.ledger_name}（--verbose）")
         parts = [
             f"今天催 {len(rep.due)}",
             f"超期但未到复提醒间隔 {len(rep.overdue_muted)}",
@@ -296,7 +332,7 @@ def render(reports: list[core.Report], today: date, write_on: bool,
             lines.append(f"   ℹ️ {n}")
         if rep.review_hints:
             lines.append(
-                f"   📋 待复核 {len(rep.review_hints)} 条（底纹与规则判定不一致）："
+                f"   📋 待复核 {len(rep.review_hints)} 条（需人工确认判定依据）："
             )
             for h in rep.review_hints[:5]:
                 lines.append(f"      {h}")
@@ -304,8 +340,6 @@ def render(reports: list[core.Report], today: date, write_on: bool,
                 lines.append(f"      … 另有 {len(rep.review_hints) - 5} 条")
         if not write_on:
             lines.append("   🔒 演练模式：reminders.write=false，不会创建任何提醒事项")
-
-    return "\n".join(lines)
 
 
 def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
@@ -338,11 +372,11 @@ def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
         L.append("")
         L.append(f"⚠️ {w}")
 
-    for rep in reports:
-        groups = group_items(rep, output_cfg)
+    for section in merge_reports(reports):
+        groups = group_items(section.items, output_cfg)
         L.append("")
-        L.append(f"## {rep.line_label}")
-        L.extend(_headline(rep, groups))
+        L.append(f"## {section.label}")
+        L.extend(_headline(section.in_scope, len(section.items), groups))
 
         for g in groups:
             L.append("")
@@ -352,16 +386,18 @@ def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
                     L.append(f"------- {g['hint_text']} -------")
                 L.append(f"{i + 1}、{it.name} — 超期 {it.overdue_days} 天")
 
-        problems = _problems(rep)
+        problems = [problem for report in section.reports
+                    for problem in _problems(report)]
         if problems:
             L.append("")
             L.append("### ⚠️ 需要注意")
             for p in problems:
                 L.append(f"- {p}")
 
-        for d in rep.disabled_nodes:
-            L.append("")
-            L.append(f"> ⏸ {d.split('：')[0]}：未启用，不会产生催办")
+        for report in section.reports:
+            for disabled in report.disabled_nodes:
+                L.append("")
+                L.append(f"> ⏸ {disabled.split('：')[0]}：未启用，不会产生催办")
 
     return "\n".join(L)
 

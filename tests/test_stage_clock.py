@@ -16,7 +16,8 @@ from __future__ import annotations
 import unittest
 from datetime import date, timedelta
 
-from harness import (make_sheet, row, temp_home, run_main, read_state)
+from harness import (make_sheet, row, temp_home, run_main, read_state,
+                     rules_cfg)
 
 # 基准日必须让所有 at(n) 都落在真实「今天」之前 ——
 # --today 是未来日期时会被守卫拒绝（那会写出未来日期的快照污染计时）。
@@ -40,6 +41,17 @@ def sheet_test(progress: date):
 
 
 class StageClockTest(unittest.TestCase):
+
+    @staticmethod
+    def _fallback_rules():
+        rules = rules_cfg()
+        install = next(
+            node for node in rules["rulesets"]["box"]["nodes"]
+            if node["id"] == "install"
+        )
+        install["clock"]["fallback"] = ["最新进展日期", "需求上报日期"]
+        rules["rulesets"]["box"]["nodes"] = [install]
+        return rules
 
     def _run(self, home_kwargs, sheet, today):
         return run_main([f"--today={today}", "--force-push"], sheet)
@@ -146,6 +158,28 @@ class StageClockTest(unittest.TestCase):
             se = read_state(home, "stage_entered.json")
             self.assertEqual(se["box|1|install"], at(0).isoformat(),
                              "节点没变，计时起点就不该动")
+
+    def test_secondary_fallback_counts_without_skip_warning(self):
+        """主字段空时使用次级日期，不得误报「会被跳过」。"""
+        rules = self._fallback_rules()
+        sheet = sheet_install(progress=None)
+        with temp_home(rules=rules):
+            r = run_main([f"--today={at(40)}", "--dry-run"], sheet)
+        self.assertEqual(r.code, 0, r.err)
+        self.assertIn("超期 19 天", r.out)
+        self.assertNotIn("会被跳过", r.out)
+        self.assertNotIn("无可用计时起点", r.out)
+
+    def test_all_fallbacks_empty_warns_no_clock(self):
+        """所有候选都无效时，才提示「无可用计时起点」。"""
+        rules = self._fallback_rules()
+        sheet = make_sheet([row(1, "甲公司", tech="可行", install="",
+                                reported=None, progress=None)])
+        with temp_home(rules=rules):
+            r = run_main([f"--today={at(40)}", "--dry-run"], sheet)
+        self.assertEqual(r.code, 0, r.err)
+        self.assertIn("无可用计时起点", r.out)
+        self.assertNotIn("会被跳过", r.out)
 
 
 class CorruptStateTest(unittest.TestCase):

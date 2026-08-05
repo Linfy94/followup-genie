@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import unittest
+import json
 from datetime import date
+from pathlib import Path
 
 from harness import core, holidays_cfg, temp_home, run_main, make_sheet, row
 
 CFG = {"exclude_weekends": True, "exclude_holidays": True}
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def calc(holidays=None):
@@ -23,6 +26,23 @@ def calc(holidays=None):
 
 
 class WorkdayCountTest(unittest.TestCase):
+
+    def test_release_template_contains_verified_2026_calendar(self):
+        preset = json.loads(
+            (ROOT / "templates" / "holidays.example.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertTrue(preset["verified"])
+        self.assertEqual(preset["covers_year"], 2026)
+        self.assertEqual(len(preset["holidays"]), 33)
+        self.assertEqual(
+            set(preset["workdays"]),
+            {"2026-01-04", "2026-02-14", "2026-02-28",
+             "2026-05-09", "2026-09-20", "2026-10-10"},
+        )
+        release_calc = core.WorkdayCalc(CFG, preset)
+        self.assertFalse(release_calc.is_workday(date(2026, 10, 1)))
+        self.assertTrue(release_calc.is_workday(date(2026, 10, 10)))
 
     def test_weekend_is_not_a_workday(self):
         c = calc()
