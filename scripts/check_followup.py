@@ -279,6 +279,7 @@ def render(reports: list[core.Report], today: date, write_on: bool,
             f"超期但未到复提醒间隔 {len(rep.overdue_muted)}",
             f"终止 {len(rep.terminal)}",
             f"暂缓 {len(rep.paused)}",
+            f"跨台账核对通过 {len(rep.advanced)}",
             f"范围外 {rep.out_of_scope}",
             f"未超期 {rep.not_overdue}",
             f"无待催节点 {rep.no_node}",
@@ -544,13 +545,22 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
     snapshots: dict[str, dict] = {}
     failures: list[str] = []
     baselines: dict[str, dict] = {}
+    # 供 cross_ledger 节点（比如"是否已出现在另一张台账里"）查表用。
+    all_ledgers = {l.get("id"): l for l in active}
 
     for ledger in active:
         lid = ledger.get("id")
         # 逐份台账处理，单份失败不影响其他份
         try:
             if args.verify_readonly:
-                baselines[lid] = qqdoc.file_fingerprint(ledger["file_id"])
+                if ledger.get("source", "tencent_mcp") == "tencent_mcp":
+                    baselines[lid] = qqdoc.file_fingerprint(ledger["file_id"])
+                else:
+                    # lark_cli 暂无等价的"最后修改人/时间"指纹可核对——
+                    # 不能装作验证过了，明确报出来，只读性靠命令白名单兜底。
+                    print(f"  ⚠️ 只读性验证：台账「{ledger.get('name')}」的数据源"
+                          f"（{ledger.get('source')}）暂不支持指纹核对，"
+                          f"只依赖 lark_base.py 的只读命令白名单", file=sys.stderr)
 
             ruleset = (rules_cfg.get("rulesets") or {}).get(ledger.get("ruleset"))
             if not ruleset:
@@ -561,6 +571,7 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
             rep, snap = core.evaluate_ledger(
                 ledger, ruleset, workday, today,
                 stage_entered, followup_state, last_snapshot, stage_history,
+                all_ledgers=all_ledgers,
             )
             reports.append(rep)
             snapshots[lid] = snap
@@ -708,9 +719,18 @@ def _deliver(args, reports, today, output_cfg, primary, total_due, real_run,
     """
     label = "企微" if primary == "wecom_webhook" else "stdout"
 
-    # ── 法定节假日不推 ───────────────────────────────────────────────
-    # cron 的 `0 9 * * 1-5` 只排周末，排不掉国庆春节 —— 连休期间业务在放假，
-    # 每天早上照收催办。这里补上第二道闸门。
+    # ── 非工作日不推 ─────────────────────────────────────────────────
+    # cron 每天 9:00 只负责「叫醒一次」，**今天该不该发全在这里判断** ——
+    # 因为只有这里读得到 config/holidays.json。
+    #
+    # 0.3.0-rc4 时 cron 的星期字段写死成周一至周五，这道闸门只用来补法定节假日。
+    # 0.4.0-rc1 把 cron 改回每天，原因是那个写法**排不掉调休补班日**：
+    # 2026 年 6 个补班日（1/4、2/14、2/28、5/9、9/20、10/10）全落在周六周日，
+    # 业务在上班，cron 却根本不触发 —— 而它看起来和「今天没有要催的」一模一样。
+    # 现在三种情形都由 is_workday() 一处判定：
+    #   普通周末   → 不发
+    #   法定假日   → 不发
+    #   调休补班日 → **照发**（extra_workdays 优先于「是周六」）
     #
     # 🔴 只拦投递，**判定照跑、健康记录照写**。原因不显眼但很硬：
     #    watchdog 的 missed_runs() 只跳周末、不认识节假日（watchdog.py 里
@@ -723,14 +743,17 @@ def _deliver(args, reports, today, output_cfg, primary, total_due, real_run,
     #    塞进去等于亲手造出那个误报。返回 None 正好——它不算故障。
     #
     # 工作日口径来自 rules.json 的 workday 与 config/holidays.json。
-    # 节假日表没启用时 is_workday() 只排周末，而 cron 本来就排了周末，
-    # 等于维持现状 —— 业务电脑上要等节假日表拷过去才真正生效，
-    # doctor 会就此点名提醒。
+    # 🔴 节假日表没启用/漏拷时 is_workday() 只排周末 —— 法定假日会照发，
+    #    补班日会不发。cron 改成每天之后这不再等于「维持现状」，
+    #    而是**真的会推错**，所以 doctor 那条点名提醒比以前更重要。
     notify_cfg = output_cfg.get("notify") or {}
     if (notify_cfg.get("skip_non_workdays", True) and workday is not None
             and not workday.is_workday(today)):
+        # 说清是哪一种「非工作日」。业务看到「今天是法定节假日」而当天只是
+        # 普通周六，会以为节假日表配错了 —— 白跑一趟排查。
+        why = "法定节假日" if today in workday.holidays else "周末"
         return None, {"channel": primary, "attempted": False, "sent": 0,
-                      "total": 0, "summary": f"今天是法定节假日，{label}未发送"}
+                      "total": 0, "summary": f"今天是{why}，{label}未发送"}
 
     if not total_due:
         return None, {"channel": primary, "attempted": False, "sent": 0,
@@ -824,6 +847,7 @@ def _print_json(reports, today, write_on, failures) -> None:
                 "counts": {
                     "due": len(r.due), "overdue_muted": len(r.overdue_muted),
                     "terminal": len(r.terminal), "paused": len(r.paused),
+                    "advanced": len(r.advanced),
                     "out_of_scope": r.out_of_scope, "not_overdue": r.not_overdue,
                     "no_node": r.no_node,
                 },

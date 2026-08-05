@@ -4,7 +4,9 @@
 法定节假日不推送。
 
 ═══════════════════════════════════════════════════════════════════════
-🔴 0.3.0-rc3 及之前：cron 的 `0 9 * * 1-5` 只排得掉周末，排不掉国庆春节。
+🔴 0.3.0-rc3 及之前：cron 的星期字段写死成周一至周五，只排得掉周末，
+   排不掉国庆春节。（那个写法后来又暴露了补班日不触发的问题，
+   0.4.0-rc1 改回每天跑、由本闸门统一判断，见 test_schedule.py。）
 
     check_followup 里**根本没有「今天是不是工作日」这个判断** ——
     节假日表只喂给②的复提醒计算，从不参与「今天推不推」。
@@ -41,6 +43,9 @@ from harness import (make_sheet, row, days_ago, temp_home, run_main,
 HOLIDAY = date(2026, 2, 16)
 WORKDAY = date(2026, 2, 25)      # 春节后的正常周三
 MAKEUP = date(2026, 2, 28)       # 周六补班日：上班，要推
+# 普通周六，不在 holidays 也不在 workdays 里。cron 改成每天之后，
+# 「周末不推」这件事完全落在 is_workday() 身上，得单独测住。
+PLAIN_SATURDAY = date(2026, 3, 7)
 
 
 def overdue_sheet(today):
@@ -146,16 +151,44 @@ class NormalDaysUnaffectedTest(unittest.TestCase):
 
     def test_makeup_workday_pushes(self):
         """
-        调休补班日是周六但要上班，脚本层必须判它是工作日。
+        🔴 调休补班日是周六但要上班，必须推。
 
-        （cron 的 `1-5` 那天本来就不跑，所以现实中推不出来 ——
-        这是选定方案的已知代价，记在 KNOWN_ISSUES。但脚本层的判断
-        必须是对的，否则日后把 cron 改成每天时会踩到。）
+        0.4.0-rc1 之前 cron 的星期字段写死成周一至周五，这一天**根本不触发** ——
+        脚本层判断得再对也没用，业务在上班却收不到催办，
+        而它看起来和「今天没有要催的」一模一样。现在 cron 每天叫醒，
+        由这里判定，这条测试才真正对应线上行为。
         """
         self.assertEqual(MAKEUP.weekday(), 5, "确认 2/28 确实是周六")
         with temp_home():
             r = run_on(MAKEUP)
             self.assertTrue(r.posts, "补班日上班，应该推")
+
+    def test_ordinary_weekend_does_not_push(self):
+        """
+        🔴 普通周末不推 —— 这条以前由 cron 的 `1-5` 兜着，现在没人兜了。
+
+        cron 改成每天之后，「周六不推」完全依赖 is_workday()。
+        这条要是坏了，业务每个周末都会收到催办，
+        而这正是催办类产品被屏蔽的最快途径。
+        """
+        self.assertEqual(PLAIN_SATURDAY.weekday(), 5, "确认确实是周六")
+        with temp_home() as home:
+            r = run_on(PLAIN_SATURDAY)
+            self.assertEqual(r.posts, [], "普通周末不该推")
+            self.assertEqual(r.code, 0, "不推不是故障")
+            fs = read_state(home, "followup_state.json")
+            notified = [k for k, v in (fs or {}).items() if v.get("last_notified")]
+            self.assertEqual(notified, [], "没推就不该记已通知")
+
+    def test_weekend_says_weekend_not_holiday(self):
+        """
+        措辞要说对是哪一种非工作日。业务在普通周六看到「今天是法定节假日」，
+        会以为节假日表配错了，白跑一趟排查。
+        """
+        with temp_home():
+            r = run_on(PLAIN_SATURDAY)
+        self.assertIn("周末", r.out)
+        self.assertNotIn("法定节假日", r.out)
 
     def test_due_list_is_identical_on_holiday_and_workday(self):
         """节假日只拦投递，判定一个字都不该变 —— 停滞天数照常累计。"""

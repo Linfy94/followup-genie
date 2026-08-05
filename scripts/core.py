@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover —— Windows 尚未列入本轮支持�
     fcntl = None
 
 import qqdoc
+import lark_base
 from qqdoc import LedgerError
 
 
@@ -146,6 +147,92 @@ def _type_name(v) -> str:
                                                                 type(v).__name__)
 
 
+def _validate_source_fields(l: dict, pos: int) -> list[str]:
+    """
+    每种数据源各自的必填字段。
+
+    🔴 缺字段的下场不是「报错退出」而是**裸 traceback**：
+    `lark_base.read_sheet(l["base_token"], ...)` 会抛 KeyError，
+    业务看到的是一屏英文堆栈，完全不知道该改哪里。
+    """
+    errs: list[str] = []
+    where = f"台账「{l.get('name') or l.get('id') or pos}」"
+    source = l.get("source", "tencent_mcp")
+
+    if source == "tencent_mcp":
+        for f in ("file_id", "sheet_id"):
+            if not l.get(f):
+                errs.append(f"{where}的 source 是 tencent_mcp，缺少 {f}")
+    elif source == "lark_cli":
+        for f, hint in (("base_token", "飞书多维表格的 app/base token"),
+                        ("table_id", "数据表 id，形如 tblXXXXXXXX"),
+                        ("profile", "lark-cli 的身份配置名，决定用谁的授权去读")):
+            if not l.get(f):
+                errs.append(f"{where}的 source 是 lark_cli，缺少 {f}（{hint}）")
+        errs.extend(_validate_link_date_fields(l, where))
+    else:
+        errs.append(
+            f"{where}的 source={source!r} 不支持。"
+            f"目前实现了 tencent_mcp（腾讯文档）和 lark_cli（飞书多维表格）。")
+    return errs
+
+
+def _validate_link_date_fields(l: dict, where: str) -> list[str]:
+    """
+    link_date_fields 把主表上的关联字段换成关联记录里的某个日期。
+
+    结构写错时 `read_sheet` 里 `spec["link_field"]` 直接 KeyError；
+    更坏的情形是整段写成对象而不是数组，`for spec in ...` 会去遍历它的键，
+    于是 spec 成了字符串、`spec["link_field"]` 报 TypeError —— 两种都是裸堆栈。
+    """
+    errs: list[str] = []
+    ldf = l.get("link_date_fields")
+    if ldf is None:
+        return errs
+    if not isinstance(ldf, list):
+        return [f"{where}的 link_date_fields 应该是数组，实际是{_type_name(ldf)}"]
+    for i, spec in enumerate(ldf, 1):
+        if not isinstance(spec, dict):
+            errs.append(f"{where}的 link_date_fields 第 {i} 项应该是对象，"
+                        f"实际是{_type_name(spec)}")
+            continue
+        for f in ("link_field", "child_table_id", "child_date_field"):
+            if not spec.get(f):
+                errs.append(f"{where}的 link_date_fields 第 {i} 项缺少 {f}")
+    return errs
+
+
+def _validate_cross_refs(l: dict, rules: dict, known_ids: set) -> list[str]:
+    """cross_ledger 指向的台账必须真实存在（字段是否存在要等读到表才知道）。"""
+    errs: list[str] = []
+    rset = (rules.get("rulesets") or {}).get(l.get("ruleset"))
+    if not isinstance(rset, dict):
+        return errs
+    for n in rset.get("nodes") or []:
+        if not isinstance(n, dict):
+            continue
+        cross = n.get("cross_ledger")
+        if not cross:
+            continue
+        node = n.get("name") or n.get("id") or "?"
+        if not isinstance(cross, dict):
+            errs.append(f"节点「{node}」的 cross_ledger 应该是对象，"
+                        f"实际是{_type_name(cross)}")
+            continue
+        target = cross.get("ledger_id")
+        if not target:
+            errs.append(f"节点「{node}」的 cross_ledger 缺少 ledger_id")
+        elif target not in known_ids:
+            errs.append(
+                f"节点「{node}」的 cross_ledger 指向 ledger_id={target!r}，"
+                f"但 ledgers.json 里没有这个 id（现有：{sorted(known_ids)}）。"
+                f"跨台账核对查不到目标台账时这个节点会永远催下去。")
+        if not (cross.get("target_field") or cross.get("match_field")):
+            errs.append(f"节点「{node}」的 cross_ledger 既没有 target_field "
+                        f"也没有 match_field，不知道拿哪一列去对")
+    return errs
+
+
 def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
     """
     顶层对了不代表能跑 —— 关键字段的**类型**也得对。返回人话错误列表（空 = 通过）。
@@ -165,13 +252,35 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
     elif not isinstance(lst, list):
         errs.append(f"ledgers.json 的 ledgers 应该是数组，实际是{_type_name(lst)}")
     else:
+        seen_ids: dict = {}
         for i, l in enumerate(lst):
             if not isinstance(l, dict):
                 errs.append(f"ledgers.json 的第 {i + 1} 个台账应该是对象，"
                             f"实际是{_type_name(l)}")
-            elif not l.get("id"):
+                continue
+            lid = l.get("id")
+            if not lid:
                 errs.append(f"ledgers.json 的第 {i + 1} 个台账缺少 id"
                             f"（状态文件名要用它，不能为空）")
+            elif lid in seen_ids:
+                # 🔴 重复的 id 不会报错，只会让两份台账共用同一套状态文件：
+                # stage_entered / followup_state / 快照全部串台，
+                # 一份台账的「已通知」把另一份静音掉，而总数照样对得上。
+                errs.append(
+                    f"ledgers.json 里有两份台账都叫 id={lid!r}"
+                    f"（第 {seen_ids[lid]} 个和第 {i + 1} 个）。"
+                    f"id 是状态文件的键，重复会让两份台账共用催办状态、互相静音。")
+            else:
+                seen_ids[lid] = i + 1
+            errs.extend(_validate_source_fields(l, i + 1))
+
+        # cross_ledger 的引用必须指向真实存在的台账。指错了只有跑到那个节点
+        # 才炸，而那可能是几天后的事；能离线查出来就不该留到线上。
+        known = set(seen_ids)
+        for l in lst:
+            if not isinstance(l, dict):
+                continue
+            errs.extend(_validate_cross_refs(l, rules, known))
 
     # ── rules.json ──
     rs = rules.get("rulesets")
@@ -202,11 +311,12 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
                     errs.append(f"{where}的 threshold 应该是对象，"
                                 f"实际是{_type_name(thr)}")
                     continue
+                unit_key = "workdays" if "workdays" in thr else "days"
                 try:
-                    int(thr.get("days"))
+                    int(thr.get(unit_key))
                 except (TypeError, ValueError):
-                    errs.append(f"{where}的 threshold.days 不是数字："
-                                f"{thr.get('days')!r}")
+                    errs.append(f"{where}的 threshold.{unit_key} 不是数字："
+                                f"{thr.get(unit_key)!r}")
                 b = thr.get("boundary", "after")
                 if b not in ("on", "after"):
                     errs.append(f"{where}的 threshold.boundary＝{b!r} 不合法，"
@@ -806,7 +916,8 @@ def nodes_using_workdays(rules_cfg: dict) -> list[str]:
         for node in ruleset.get("nodes") or []:
             if not isinstance(node, dict) or node.get("enabled") is False:
                 continue
-            if (node.get("repeat") or {}).get("workdays"):
+            if ((node.get("repeat") or {}).get("workdays")
+                    or (node.get("threshold") or {}).get("workdays")):
                 names.append(str(node.get("stage") or node.get("name") or node.get("id") or "?"))
     return names
 
@@ -898,7 +1009,8 @@ def match_condition(get_text, cond: dict) -> bool:
     """
     对一行数据求一个条件的真假。
 
-    支持的 op：in / not_in / equals / not_equals / empty / not_empty / contains
+    支持的 op：in / not_in / equals / not_equals / empty / not_empty /
+             contains / not_contains
     """
     field = cond.get("field")
     op = cond.get("op", "equals")
@@ -918,6 +1030,11 @@ def match_condition(get_text, cond: dict) -> bool:
         return val != cond.get("value", "")
     if op == "contains":
         return cond.get("value", "") in val
+    if op == "not_contains":
+        # 给"公式字段拼出一整句话，值本身会变"这种场景用（比如飞书的
+        # 「项目状态」把停滞天数拼进字符串里）——没法用 in/equals 枚举，
+        # 只能按子串判断，而"未包含某关键词"没法用现有 op 表达。
+        return cond.get("value", "") not in val
     raise LedgerError(f"配置里出现不支持的 op：{op!r}（字段 {field!r}）")
 
 
@@ -1070,6 +1187,10 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
             for k in ("field", "fallback"):
                 if clock.get(k):
                     referenced.add(clock[k])
+            cross = node.get("cross_ledger") or {}
+            local_field = cross.get("match_field")
+            if local_field:
+                referenced.add(local_field)
     for f in ledger.get("scope_filters") or []:
         if f.get("field"):
             referenced.add(f["field"])
@@ -1117,11 +1238,29 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
             if clock.get(k):
                 date_fields.add(clock[k])
     for f in sorted(date_fields):
-        bad = [sheet.text(r, key_field) for r in rows if sheet.date(r, f) is None]
-        if bad:
+        # 🔴 「该列为空」和「有内容但解析不出日期」必须分开说。
+        #    合起来报「N 行无法解析为日期」会把「业务还没填」说成故障 ——
+        #    2026-08-04 排查哨兵线时我自己就被这句话带偏了半小时：
+        #    哨兵前期 11 行、飞书 53 行报「无法解析」，实际全是空值，完全正常。
+        #    而真正的解析失败（比如关联字段读出 record id）才是要动手的问题。
+        blank, unparsable = [], []
+        for r in rows:
+            if sheet.date(r, f) is not None:
+                continue
+            (blank if not sheet.text(r, f) else unparsable).append(
+                sheet.text(r, key_field))
+        if blank:
             a.warnings.append(
-                f"{f} 有 {len(bad)} 行无法解析为日期（序号 {', '.join(bad[:8])}"
-                f"{' 等' if len(bad) > 8 else ''}）。这些行在依赖该列的节点上会被跳过。"
+                f"{f} 有 {len(blank)} 行为空（{', '.join(blank[:8])}"
+                f"{' 等' if len(blank) > 8 else ''}）。"
+                f"这些行在依赖该列的节点上会被跳过 —— 若属正常（业务尚未填写）可忽略。"
+            )
+        if unparsable:
+            a.warnings.append(
+                f"{f} 有 {len(unparsable)} 行有内容但解析不出日期"
+                f"（{', '.join(unparsable[:8])}{' 等' if len(unparsable) > 8 else ''}）。"
+                f"这些行在依赖该列的节点上会被跳过。"
+                f"常见原因：该列实际是关联/引用字段，读到的是记录 ID 而不是日期。"
             )
         today = date.today()
         future = [
@@ -1153,14 +1292,28 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         if not node.get("enabled"):
             continue
         rep = node.get("repeat") or {}
-        if not (rep.get("days") or rep.get("workdays")):
+        if not (rep.get("days") or rep.get("workdays") or rep.get("weekday")):
             a.fatal.append(
                 f"节点「{node.get('name')}」缺少 repeat（复提醒间隔）。"
                 f"不允许默认成「只催一次」，请在 rules.json 里补上。"
             )
+        if rep.get("weekday") and rep["weekday"] not in _WEEKDAY_INDEX:
+            a.fatal.append(
+                f"节点「{node.get('name')}」的 repeat.weekday＝{rep['weekday']!r} "
+                f"不合法，只能是 Mon/Tue/Wed/Thu/Fri/Sat/Sun 或其全称"
+            )
         thr = node.get("threshold") or {}
-        if not thr.get("days"):
-            a.fatal.append(f"节点「{node.get('name')}」缺少 threshold.days（阈值）")
+        # 存在性用 in 判断，不用真值判断——threshold.days=0 是合法值
+        # （"进入即算超期"，靠 repeat.weekday 管节奏），不能被当成"没填"。
+        if not ("days" in thr or "workdays" in thr):
+            a.fatal.append(
+                f"节点「{node.get('name')}」缺少 threshold.days/workdays（阈值）"
+            )
+        if "days" in thr and "workdays" in thr:
+            a.fatal.append(
+                f"节点「{node.get('name')}」的 threshold 同时填了 days 和 workdays，"
+                f"两者是互斥的两种单位，必须只选一个。"
+            )
         b = thr.get("boundary", "after")
         if b not in ("on", "after"):
             # 写错值不许静默按默认走 —— 那会悄悄改掉这个节点的口径
@@ -1178,9 +1331,20 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
 
 
 def first_reminder_day(node: dict) -> int:
-    """这个节点停滞到第几天首次提醒。doctor 的边界对照表和判定共用同一个算法。"""
+    """
+    这个节点停滞到第几"天"首次提醒。doctor 的边界对照表和判定共用同一个算法。
+
+    单位取决于 threshold 里填的是 days 还是 workdays——两者不会同时出现
+    （assert_sheet 已校验过）。这个数字本身不关心单位，只负责边界换算；
+    调用方（evaluate_ledger）要按同一个字段决定「停滞天数」是按自然日
+    还是按工作日算，否则「阈值 3 个工作日」会被拿自然日天数去比。
+    """
     thr = node.get("threshold") or {}
-    days = int(thr.get("days") or 0)
+    # 用 in 判断存在性，不用真值判断——threshold.days=0（"进入即算超期"，
+    # 靠 repeat.weekday 之类的日历节律来真正管住节奏）是合法配置，
+    # 而 `0 or thr.get("workdays")` 会把它误判成"没填 days，退回 workdays"。
+    raw = thr.get("days") if "days" in thr else thr.get("workdays")
+    days = int(raw or 0)
     return days if thr.get("boundary", "after") == "on" else days + 1
 
 
@@ -1279,6 +1443,10 @@ class Report:
         self.overdue_muted: list[Item] = []  # 超期但未到复提醒间隔
         self.terminal: list[tuple] = []
         self.paused: list[tuple] = []
+        # 跨台账核对命中：项目已经在另一份台账里出现，本节点不用再催。
+        # 跟 terminal/paused 分开记，是因为它既不是"结束"也不是"暂缓"——
+        # 只是催办的接力棒交给了另一张台账，需要单独一栏才能解释总数对不对得上。
+        self.advanced: list[tuple] = []
         self.out_of_scope = 0
         self.out_of_scope_detail: dict[str, int] = {}
         self.no_node = 0
@@ -1294,8 +1462,8 @@ class Report:
     @property
     def accounted(self) -> int:
         return (len(self.due) + len(self.overdue_muted) + len(self.terminal)
-                + len(self.paused) + self.out_of_scope + self.no_node
-                + self.not_overdue)
+                + len(self.paused) + len(self.advanced) + self.out_of_scope
+                + self.no_node + self.not_overdue)
 
 
 def judge_terminal(get_text, ledger: dict, key: str) -> str | None:
@@ -1410,20 +1578,94 @@ def close_cycle(stage_history: dict, state_key: str, stage_entered: dict,
     )
 
 
+_WEEKDAY_INDEX = {
+    "Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6,
+    "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3, "Friday": 4,
+    "Saturday": 5, "Sunday": 6,
+}
+
+
+def read_ledger_sheet(ledger: dict):
+    """
+    按台账的 source 取数，返回统一接口（header/data_rows/text/date/has_column）
+    的 Sheet 对象——core.py 其余逻辑不关心背后是腾讯文档还是飞书多维表格。
+
+    接新数据源时只在这里加一个分支，不动调用方。
+    """
+    source = ledger.get("source", "tencent_mcp")
+    if source == "tencent_mcp":
+        return qqdoc.read_sheet(ledger["file_id"], ledger["sheet_id"])
+    if source == "lark_cli":
+        return lark_base.read_sheet(
+            ledger["base_token"], ledger["table_id"],
+            profile=ledger.get("profile", "sentinel"),
+            link_date_fields=ledger.get("link_date_fields"),
+        )
+    raise LedgerError(
+        f"台账「{ledger.get('name')}」的 source={source!r} 不支持。"
+        f"目前只实现了 tencent_mcp 和 lark_cli。"
+    )
+
+
+def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict) -> set[str]:
+    """
+    取 cross_ledger 配置指向的目标台账、目标字段的全部取值（带缓存）。
+
+    缓存按 ledger_id 存在 evaluate_ledger 这一次调用范围内——同一目标台账
+    可能被多行、甚至多个节点引用，没有理由重复取数。
+    """
+    lid = cfg.get("ledger_id")
+    if lid in cache:
+        return cache[lid]
+    target = (all_ledgers or {}).get(lid)
+    if target is None:
+        raise LedgerError(
+            f"节点的 cross_ledger 引用了台账 id={lid!r}，但没有在 all_ledgers 里找到。"
+            f"多台账核对必须能看到全部台账配置，不能静默当成「没查到」——"
+            f"那会让这个节点永远催、永远不消失。"
+        )
+    target_sheet = read_ledger_sheet(target)
+    field = cfg.get("target_field") or cfg.get("match_field")
+    name_field = target.get("name_field", "项目名称")
+    # 🔴 字段名写错 / 对方改了列名时，Sheet.text() 对每一行都返回 ""，
+    #    于是取值集合是空的 —— 「一条都没进主台账」，这个节点会永远催下去。
+    #    不报错、总数还对得上，是最难发现的那种坏法。必须在这里挡住。
+    for f, what in ((field, "target_field"), (name_field, "name_field")):
+        if not target_sheet.has_column(f):
+            raise LedgerError(
+                f"跨台账核对：目标台账「{target.get('name') or lid}」里没有"
+                f"名为「{f}」的列（{what}）。现有列：{[h for h in target_sheet.header if h][:20]}。\n"
+                f"🔴 这不能当成「没查到」继续跑 —— 那会让这个节点永远催下去。"
+            )
+    values = {
+        target_sheet.text(r, field) for r in target_sheet.data_rows
+        if target_sheet.text(r, name_field)
+    }
+    values.discard("")
+    cache[lid] = values
+    return values
+
+
 def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
                     today: date, stage_entered: dict, followup_state: dict,
-                    last_snapshot: dict, stage_history: dict | None = None
+                    last_snapshot: dict, stage_history: dict | None = None,
+                    all_ledgers: dict | None = None,
                     ) -> tuple[Report, dict]:
     """
     对一份台账跑一次完整判定。
 
     返回 (报告, 本次快照)。不写任何文件——写入由调用方统一做，
     这样 doctor 可以跑判定而不留痕。
+
+    all_ledgers：{ledger_id: 台账配置} 的映射，只在某个节点声明了
+    cross_ledger（比如"是否已出现在另一张台账里"）时才用到。不传就是 None——
+    这类节点碰到时会直接报错，而不是静默当成"没查到"继续催个没完。
     """
     if stage_history is None:
         stage_history = {}
     rep = Report(ledger)
-    sheet = qqdoc.read_sheet(ledger["file_id"], ledger["sheet_id"])
+    cross_cache: dict[str, set[str]] = {}
+    sheet = read_ledger_sheet(ledger)
 
     a = assert_sheet(sheet, ledger, ruleset)
     if not a.ok:
@@ -1503,6 +1745,18 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
             rep.no_node += 1
             continue
 
+        # 4b) 跨台账核对：这个节点的完成信号不在本台账里，而是"出现在另一张
+        # 台账里"（比如③分行扫码登记）。查到了就不再算它卡在这个节点——
+        # 不管是不是在阈值窗口内查到的：迟到也是到了，不该继续催。
+        cross_cfg = current.get("cross_ledger")
+        if cross_cfg:
+            values = _cross_ledger_values(cross_cfg, all_ledgers or {}, cross_cache)
+            match_val = get_text(cross_cfg.get("match_field", name_field))
+            if match_val and match_val in values:
+                target_name = (all_ledgers or {}).get(cross_cfg.get("ledger_id"), {}).get("name", cross_cfg.get("ledger_id"))
+                rep.advanced.append((key, name, f"已出现在「{target_name}」"))
+                continue
+
         node_id = current["id"]
         snapshot[key] = node_id
         state_key = f"{ledger['id']}|{key}|{node_id}"
@@ -1552,7 +1806,11 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
         # 永远跨不过阈值 —— 又一处不报错的静默失效。
         stage_entered.setdefault(state_key, iso(start))
 
-        stalled = (today - start).days
+        thr_cfg = current.get("threshold") or {}
+        if thr_cfg.get("workdays"):
+            stalled = workday.count_between(start, today)
+        else:
+            stalled = (today - start).days
         item = Item(ledger["id"], ledger.get("line"), key, name, node_id,
                     current["name"], stalled, start, src,
                     current.get("action", ""), current.get("backlog_note", ""),
@@ -1572,7 +1830,17 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
         st.setdefault("first_overdue", iso(today))
         last = parse_iso(st.get("last_notified"))
         rep_cfg = current.get("repeat") or {}
-        if last is None:
+        if rep_cfg.get("weekday"):
+            # 日历节律：不是"距上次过了几天"，是"只在某个星期几提醒"——
+            # 首次超期也不例外，否则第一条会在错的日子被催出去。
+            target_wd = _WEEKDAY_INDEX.get(rep_cfg["weekday"])
+            if target_wd is None:
+                raise LedgerError(
+                    f"节点「{current.get('name')}」的 repeat.weekday="
+                    f"{rep_cfg['weekday']!r} 不是合法的星期几"
+                )
+            due = today.weekday() == target_wd
+        elif last is None:
             due = True  # 首次超期，一定催
         elif rep_cfg.get("workdays"):
             due = workday.count_between(last, today) >= int(rep_cfg["workdays"])

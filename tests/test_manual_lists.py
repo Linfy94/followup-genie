@@ -141,7 +141,23 @@ class RealConfigTest(unittest.TestCase):
         entries = []
         for field, _label, _fatal in core.MANUAL_LISTS:
             entries.extend(core.manual_list_entries(led, field))
-        self.assertTrue(entries, "真实配置里应该有人工名单")
+
+        # 🔴 不断言「必须有人工名单」。
+        #
+        # 那几张名单（manual_terminal / paused / 灰名单 / 语义例外）从设计上
+        # 就是**过渡手段**：方案原文写明「台账正式加「终止」列并接入后，
+        # 应逐条核对后删除，避免两处维护同一件事」。
+        #
+        # 2026-08-03 盒子台账新增了权威的「项目状态」列，这几张名单随即全部
+        # 停用（配置里改名加 _已停用_ 前缀，内容留痕可回溯）—— 而当时这条
+        # 断言把「必须有名单」当成了不变量，于是配置一退休它就红了。
+        #
+        # 把过渡状态写死成不变量，等于用测试拦住了本来就该发生的演进。
+        # 现在改成：有名单就校验结构，没有就说明它已退休。
+        if not entries:
+            self.skipTest(
+                "真实配置里没有启用中的人工名单 —— "
+                "台账已接入权威的终止列，这几张过渡名单按设计退休了")
         for e in entries:
             self.assertTrue(e["key"], f"名单条目缺 key：{e}")
 

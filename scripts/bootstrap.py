@@ -146,6 +146,131 @@ def retire_stale_code(source: Path, destination: Path) -> list[str]:
     return retired
 
 
+def verify_package(source: Path) -> None:
+    """
+    替换旧版**之前**，先确认新版自己是完整的、至少语法上跑得起来。
+
+    🔴 顺序很重要。以前是「先覆盖，再让 setup 去发现问题」——
+    包缺文件或某个 .py 有语法错时，旧版已经被覆盖掉了，
+    而定时任务照样会在第二天早上 9:00 触发**半升级的代码**。
+    催办类工具最怕的就是这种：它不会崩得很响，只会「今天没有要催的」。
+
+    这里只做便宜且确定的检查（清单齐全 + 能编译），不 import 新版代码 ——
+    import 会执行模块顶层语句，等于在校验阶段就把新版跑起来了。
+    """
+    missing = [n for n in PACKAGE_FILES if not (source / n).is_file()]
+    missing += [f"{n}/" for n in PACKAGE_DIRS if not (source / n).is_dir()]
+    if missing:
+        raise BootstrapError(
+            "安装包不完整，缺少：" + "、".join(missing) + "。已停止，未改动现有程序。")
+
+    for entry in ("scripts/check_followup.py", "scripts/core.py",
+                  "scripts/doctor.py", "scripts/setup.sh"):
+        if not (source / entry).is_file():
+            raise BootstrapError(
+                f"安装包缺少关键文件 {entry}。已停止，未改动现有程序。")
+
+    version = (source / "VERSION").read_text(encoding="utf-8").strip()
+    if not version:
+        raise BootstrapError("安装包里的 VERSION 是空的。已停止，未改动现有程序。")
+
+    bad = []
+    for py in sorted((source / "scripts").rglob("*.py")):
+        if _manifest.should_skip(py.name):
+            continue
+        try:
+            compile(py.read_text(encoding="utf-8"), str(py), "exec")
+        except (SyntaxError, ValueError, UnicodeDecodeError) as exc:
+            bad.append(f"{py.relative_to(source)}：{exc}")
+    if bad:
+        raise BootstrapError(
+            "安装包里有无法编译的脚本，已停止，未改动现有程序：\n  "
+            + "\n  ".join(bad))
+
+
+def snapshot_code(destination: Path) -> "Path | None":
+    """
+    把现有版本的代码原样存一份，供升级失败时恢复。返回快照目录（首次安装返回 None）。
+
+    只存清单范围内的东西。业务配置、状态、凭证本来就不在清单里，
+    不进快照，也就绝不可能被恢复动作覆盖掉。
+    """
+    if not destination.is_dir():
+        return None
+    if not any((destination / n).exists() for n in PACKAGE_FILES + PACKAGE_DIRS):
+        return None      # 空目录，算首次安装
+    snap = destination / f".upgrade-rollback-{datetime.now():%Y%m%d-%H%M%S}"
+    snap.mkdir(parents=True, exist_ok=True)
+    for name in PACKAGE_FILES:
+        src = destination / name
+        if src.is_file():
+            shutil.copy2(src, snap / name)
+    for name in PACKAGE_DIRS:
+        src = destination / name
+        if src.is_dir():
+            shutil.copytree(src, snap / name, dirs_exist_ok=True,
+                            copy_function=shutil.copy2, ignore=should_ignore)
+    return snap
+
+
+def restore_snapshot(snapshot: Path, destination: Path) -> None:
+    """
+    把 destination 的清单范围恢复成 snapshot 里的样子。
+
+    **不删除任何东西**：现场那一份先挪进 `<快照>/replaced/`，再把旧版拷回来。
+    这样既不会留下新版多出来的文件（半升级），也留得住现场供事后查。
+
+    清单之外的一切（followup/、runtime/、state/、.env、notes/、
+    以及 retire_stale_code 留下的 .upgrade-backup-*）一概不碰。
+    """
+    replaced = snapshot / "replaced"
+    replaced.mkdir(parents=True, exist_ok=True)
+    for name in PACKAGE_FILES + PACKAGE_DIRS:
+        cur = destination / name
+        if cur.exists():
+            target = replaced / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+            shutil.move(str(cur), str(target))
+        old = snapshot / name
+        if old.is_file():
+            shutil.copy2(old, destination / name)
+        elif old.is_dir():
+            shutil.copytree(old, destination / name, dirs_exist_ok=True,
+                            copy_function=shutil.copy2)
+
+
+def install_or_rollback(source: Path, skill_dir: Path, runtime_home: Path,
+                        *, hermes: bool = False) -> list[str]:
+    """
+    先校验新版 → 存一份旧版 → 复制 → 跑 setup 自检。
+    任何一步失败都把旧版原样放回去，绝不让定时任务在半升级的代码上跑。
+    """
+    verify_package(source)
+    snap = snapshot_code(skill_dir)
+    try:
+        retired = copy_package(source, skill_dir)
+        _report_retired(retired)
+        run_setup(skill_dir, runtime_home, hermes=hermes)
+        return retired
+    except BootstrapError:
+        if snap is not None:
+            try:
+                restore_snapshot(snap, skill_dir)
+                print(f"↩️ 升级失败，已把原来那一版原样放回去（现场留在 {snap.name}/replaced/，"
+                      f"没有删除任何东西）。现有的定时任务仍在跑原来那一版。",
+                      file=sys.stderr)
+            except OSError as exc:
+                # 恢复都失败了，绝不能让人以为「没事」。
+                raise BootstrapError(
+                    f"升级失败，且自动恢复也失败了：{exc}\n"
+                    f"🔴 程序目录现在可能是半升级状态。"
+                    f"旧版完整地留在 {snap}，请把它手工拷回 {skill_dir}。"
+                ) from exc
+        raise
+
+
 def copy_package(source: Path, destination: Path) -> list[str]:
     """
     把包内代码覆盖过去，并把上一版残留的代码挪出执行路径。
@@ -230,9 +355,7 @@ def install_workbuddy(source: Path, workspace: Path) -> tuple[Path, Path]:
     runtime_home = workspace / "runtime"
     if skill_dir.is_symlink() or runtime_home.is_symlink():
         raise BootstrapError("程序目录和运行目录不能是符号链接")
-    retired = copy_package(source, skill_dir)
-    _report_retired(retired)
-    run_setup(skill_dir, runtime_home)
+    install_or_rollback(source, skill_dir, runtime_home)
     return skill_dir, runtime_home
 
 
@@ -268,9 +391,7 @@ def install_hermes(source: Path, home: Path) -> tuple[Path, Path]:
     skill_dir = home / "skills" / "work" / "followup-genie"
     if skill_dir.is_symlink() or home.is_symlink():
         raise BootstrapError("Hermes 目录和 Skill 目录不能是符号链接")
-    retired = copy_package(source, skill_dir)
-    _report_retired(retired)
-    run_setup(skill_dir, home, hermes=True)
+    install_or_rollback(source, skill_dir, home, hermes=True)
     return skill_dir, home
 
 

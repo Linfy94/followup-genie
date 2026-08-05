@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `0.3.0-rc4` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
+> `0.4.0-rc1` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
 
 ## 给业务：只复制下面这一段
 
@@ -11,6 +11,7 @@
 读业务维护的项目台账，找出**在某个流程节点上卡太久**的项目，生成待催清单推给业务本人。
 
 纯规则判定，零 LLM、零 token、零第三方 Python 依赖。台账**只读**。
+（接飞书多维表格时需要外部的 lark-cli 命令行工具，接腾讯文档则什么都不用装。）
 
 ```
 🧚 项目跟进精灵 · 2026-08-07
@@ -50,10 +51,32 @@
 | 项 | 要求 |
 |---|---|
 | Python | **3.9+**（macOS 自带的 3.9 就够，无需另装） |
-| 第三方依赖 | **无**。只用标准库 |
+| 第三方 Python 包 | **无**。只用标准库 |
+| 外部命令行工具 | **只有接飞书多维表格时才需要** —— 见下方「按数据源看依赖」 |
 | 操作系统 | macOS / Linux。**Windows 尚未验证** |
-| 外网 | 只需访问 `docs.qq.com`（国内直连）。推企微则加 `qyapi.weixin.qq.com`，也是国内域名 |
+| 外网 | 腾讯文档台账需 `docs.qq.com`；飞书台账需 `feishu.cn`；推企微则加 `qyapi.weixin.qq.com`。都是国内域名 |
 | 模型 API key | **不需要**。主流程是纯规则 |
+
+### 按数据源看依赖
+
+依赖是**按台账类型**算的，不是全都要。只接一种就只装那一种的东西。
+
+| 你的台账在 | 需要装 | 需要的凭证 |
+|---|---|---|
+| 腾讯文档 | **什么都不用装** | `.env` 里的 `TENCENT_DOCS_TOKEN`（扫码获取） |
+| 飞书多维表格 | **Node.js** + **lark-cli** | lark-cli 自己的授权（`lark-cli auth login`），**不需要腾讯文档凭证** |
+
+```bash
+# 只有接飞书才需要这两步
+npm install -g @larksuiteoapi/lark-cli
+lark-cli auth login
+```
+
+🔴 **程序绝不会替你自动安装 lark-cli。** 找不到它时会停下来、把上面这两条命令
+和已经找过哪些目录一起打出来，然后退出——装什么到这台电脑上该由人决定。
+
+🔴 **纯飞书用户不需要腾讯文档凭证。** `doctor` 会先看你启用了哪些台账，
+没有腾讯文档台账就不查那个凭证，也不会报红。
 
 ---
 
@@ -137,7 +160,7 @@ FOLLOWUP_ALERT_TARGET=       # 可选。故障告警发到哪，形如 telegram:
 
 ```bash
 python3 scripts/bootstrap.py --host hermes
-hermes cron create "0 9 * * 1-5" --name "项目跟进精灵" \
+hermes cron create "0 9 * * *" --name "项目跟进精灵" \
   --script followup_genie.py --no-agent
 ```
 
@@ -163,26 +186,40 @@ python3 scripts/bootstrap.py --host workbuddy --workspace "<当前工作空间>"
 FOLLOWUP_HOME=<运行时目录> /usr/bin/python3 <包>/scripts/check_followup.py
 ```
 
-crontab 示例（工作日 9:00）：
+crontab 示例（每天 9:00 叫醒一次，发不发由脚本判断）：
 
 ```cron
-0 9 * * 1-5 FOLLOWUP_HOME=/path/to/runtime /usr/bin/python3 /path/to/skill/scripts/check_followup.py
+0 9 * * * FOLLOWUP_HOME=/path/to/runtime /usr/bin/python3 /path/to/skill/scripts/check_followup.py
 ```
+
+🔴 **别把星期写成 `1-5`。** 调休补班日（2026 年有 6 个，都落在周六周日）那天业务在上班，
+写死 `1-5` 就根本不触发，而表现和「今天没有要催的」一模一样。
+让它每天跑，由脚本读 `config/holidays.json` 决定今天发不发。
 
 ⚠️ **cron 的环境与登录 shell 不同**：`PATH` 更短、没有你 shell profile 里的任何东西。
 装完务必**在宿主的实际运行路径下**验一次，别只在终端里试通就算数。
 
 ### 什么时候会推
 
-| | 推不推 | 谁管的 |
-|---|---|---|
-| 周一至周五 | ✅ 推 | 定时表达式 `1-5` |
-| 周六周日 | ❌ 不推 | 定时表达式 `1-5` |
-| **法定节假日**（国庆、春节连休等） | ❌ **不推** | **脚本**：`notify.skip_non_workdays` + `holidays.json` |
-| 调休补班日（周末但要上班） | ❌ 不推 | 定时表达式 `1-5` 那天本就不触发，见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
+定时任务每天 9:00 只负责**叫醒一次**，今天该不该发全由脚本判断：
 
-**为什么要两道**：定时表达式排得掉周末，排不掉国庆春节——连休期间业务在放假，
-每天早上照收催办。脚本因此补第二道闸门。
+| | 推不推 | 依据 |
+|---|---|---|
+| 周一至周五 | ✅ 推 | — |
+| 周六周日 | ❌ 不推 | `workday.exclude_weekends` |
+| **法定节假日**（国庆、春节连休等） | ❌ **不推** | `holidays.json` 的 `holidays` |
+| **调休补班日**（周末但要上班） | ✅ **推** | `holidays.json` 的 `workdays`，优先于「是周六」 |
+
+一个开关管总闸：`notify.skip_non_workdays`（默认 true）。
+
+**为什么不写进定时表达式**：`* * 1-5` 排得掉周末，却排不掉国庆春节，
+更排不掉调休补班日——2026 年那 6 个补班日全落在周六周日，业务在上班，
+定时任务却根本不触发，脚本连判断的机会都没有。
+把判断交给读得到节假日表的那一方，三种情形才收敛到一处。
+
+🔴 **代价**：`holidays.json` 漏拷、或 `workday.exclude_holidays` 是 false 时，
+法定假日会**照发**、补班日会**不发**。以前定时表达式还兜着周末，现在没有了。
+`doctor` 会就此点名报警——别忽略那条。
 
 🔴 **节假日闸门只拦投递，不拦判定**：停滞天数照常累计、健康记录照常写。
 这不是实现偷懒——外部存活监控只会数「错过了几个本该执行的 9:00」而**不认识节假日**，
@@ -305,7 +342,7 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 
 ## 已知边界
 
-见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.3.0-rc4` 的主要限制：
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.4.0-rc1` 的主要限制：
 WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**。
 
 ---

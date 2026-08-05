@@ -332,5 +332,174 @@ class ManagedPathSafetyTest(unittest.TestCase):
         self.assertEqual(stale.read_text(encoding="utf-8"), "保留我")
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 升级失败要能原样退回去
+#
+# 🔴 以前的顺序是「先覆盖，再让 setup 去发现问题」。包缺文件、某个 .py
+#    有语法错、自检不过 —— 这些都要等覆盖完才暴露，而那时旧版已经没了。
+#    定时任务第二天早上 9:00 照样会触发，跑的是**半升级的代码**。
+#    催办工具最怕这种：它不会崩得很响，只会「今天没有要催的」。
+# ══════════════════════════════════════════════════════════════════════
+
+class VerifyBeforeReplaceTest(unittest.TestCase):
+    """校验必须发生在动旧版之前。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fg-verify-")
+        self.addCleanup(self.tmp.cleanup)
+        self.pkg = Path(self.tmp.name) / "pkg"
+        bootstrap.copy_package(ROOT, self.pkg)     # 拿一份完整的包当素材
+
+    def test_good_package_passes(self):
+        bootstrap.verify_package(self.pkg)         # 不抛就算过
+
+    def test_missing_top_file(self):
+        (self.pkg / "VERSION").unlink()
+        with self.assertRaises(bootstrap.BootstrapError) as cm:
+            bootstrap.verify_package(self.pkg)
+        self.assertIn("VERSION", str(cm.exception))
+        self.assertIn("未改动现有程序", str(cm.exception))
+
+    def test_missing_top_dir(self):
+        shutil.rmtree(self.pkg / "tests")
+        with self.assertRaises(bootstrap.BootstrapError) as cm:
+            bootstrap.verify_package(self.pkg)
+        self.assertIn("tests/", str(cm.exception))
+
+    def test_missing_entry_script(self):
+        (self.pkg / "scripts" / "check_followup.py").unlink()
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.verify_package(self.pkg)
+
+    def test_syntax_error_in_any_script(self):
+        (self.pkg / "scripts" / "core.py").write_text(
+            "def broken(:\n", encoding="utf-8")
+        with self.assertRaises(bootstrap.BootstrapError) as cm:
+            bootstrap.verify_package(self.pkg)
+        self.assertIn("core.py", str(cm.exception))
+
+    def test_empty_version(self):
+        (self.pkg / "VERSION").write_text("  \n", encoding="utf-8")
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.verify_package(self.pkg)
+
+    def test_verify_does_not_import_the_new_code(self):
+        """
+        import 会执行模块顶层语句，等于在校验阶段就把新版跑起来了。
+        只 compile，不 import。
+        """
+        (self.pkg / "scripts" / "core.py").write_text(
+            "raise SystemExit('顶层就退出')\n", encoding="utf-8")
+        bootstrap.verify_package(self.pkg)   # 语法没问题，就该通过
+
+
+class RollbackTest(unittest.TestCase):
+    """setup / 自检不过时，把旧版原样放回去。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fg-rb-")
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.pkg = base / "pkg"
+        self.dest = base / "skill"
+        self.runtime = base / "runtime"
+        bootstrap.copy_package(ROOT, self.pkg)
+        bootstrap.copy_package(ROOT, self.dest)      # 现有的「旧版」
+        # 给旧版打个记号，好证明放回去的确实是它
+        (self.dest / "VERSION").write_text("0.0.0-old\n", encoding="utf-8")
+        (self.dest / "scripts" / "only_in_old.py").write_text(
+            "# 旧版独有\n", encoding="utf-8")
+        # 业务自己的东西 —— 全程一个字节都不许动
+        (self.dest / "followup").mkdir()
+        (self.dest / "followup" / "ledgers.json").write_text(
+            '{"ledgers": []}', encoding="utf-8")
+        (self.dest / ".env").write_text("TOKEN=不许碰\n", encoding="utf-8")
+        self.before = fingerprint(self.dest)
+
+    def _install(self):
+        return bootstrap.install_or_rollback(self.pkg, self.dest, self.runtime)
+
+    def test_setup_failure_restores_the_old_version(self):
+        with mock.patch.object(bootstrap, "run_setup",
+                               side_effect=bootstrap.BootstrapError("自检不过")):
+            with self.assertRaises(bootstrap.BootstrapError):
+                self._install()
+        self.assertEqual((self.dest / "VERSION").read_text(encoding="utf-8"),
+                         "0.0.0-old\n", "🔴 旧版没有被放回来")
+        self.assertTrue((self.dest / "scripts" / "only_in_old.py").is_file(),
+                        "旧版独有的文件也要回来")
+
+    def test_new_version_files_do_not_linger_after_rollback(self):
+        """
+        只把旧文件拷回来是不够的 —— 新版多出来的文件会留在原地，
+        那还是半升级。它们必须被移出执行路径。
+        """
+        (self.pkg / "scripts" / "only_in_new.py").write_text(
+            "# 新版独有\n", encoding="utf-8")
+        with mock.patch.object(bootstrap, "run_setup",
+                               side_effect=bootstrap.BootstrapError("自检不过")):
+            with self.assertRaises(bootstrap.BootstrapError):
+                self._install()
+        self.assertFalse((self.dest / "scripts" / "only_in_new.py").exists(),
+                         "🔴 新版的文件还在，import 得到、discover 也扫得到")
+
+    def test_nothing_is_deleted_only_moved(self):
+        (self.pkg / "scripts" / "only_in_new.py").write_text(
+            "# 新版独有\n", encoding="utf-8")
+        with mock.patch.object(bootstrap, "run_setup",
+                               side_effect=bootstrap.BootstrapError("自检不过")):
+            with self.assertRaises(bootstrap.BootstrapError):
+                self._install()
+        stashed = list(self.dest.glob(".upgrade-rollback-*/replaced/scripts/only_in_new.py"))
+        self.assertTrue(stashed, "现场要留得住，不能删")
+
+    def test_business_config_and_env_untouched(self):
+        with mock.patch.object(bootstrap, "run_setup",
+                               side_effect=bootstrap.BootstrapError("自检不过")):
+            with self.assertRaises(bootstrap.BootstrapError):
+                self._install()
+        self.assertEqual(
+            (self.dest / "followup" / "ledgers.json").read_text(encoding="utf-8"),
+            '{"ledgers": []}')
+        self.assertEqual((self.dest / ".env").read_text(encoding="utf-8"),
+                         "TOKEN=不许碰\n")
+
+    def test_managed_tree_is_byte_identical_after_rollback(self):
+        with mock.patch.object(bootstrap, "run_setup",
+                               side_effect=bootstrap.BootstrapError("自检不过")):
+            with self.assertRaises(bootstrap.BootstrapError):
+                self._install()
+        after = fingerprint(self.dest)
+
+        def keep(d):
+            return {k: v for k, v in d.items()
+                    if k in _manifest.TOP_FILES or k.startswith(
+                        tuple(n + "/" for n in _manifest.TOP_DIRS))}
+        self.assertEqual(keep(after), keep(self.before),
+                         "清单范围内必须逐字节回到升级前")
+
+    def test_bad_package_never_touches_the_old_version(self):
+        """包本身就不合格时，连快照都不用做 —— 旧版全程没被碰过。"""
+        (self.pkg / "scripts" / "core.py").write_text("def x(:\n", encoding="utf-8")
+        with self.assertRaises(bootstrap.BootstrapError):
+            self._install()
+        self.assertEqual(fingerprint(self.dest), self.before,
+                         "校验不过时不该产生任何改动，连快照目录都不该有")
+
+    def test_successful_install_leaves_the_new_version(self):
+        with mock.patch.object(bootstrap, "run_setup", return_value=None):
+            self._install()
+        self.assertNotEqual((self.dest / "VERSION").read_text(encoding="utf-8"),
+                            "0.0.0-old\n", "成功时就该是新版")
+
+    def test_first_install_has_nothing_to_roll_back(self):
+        fresh = Path(self.tmp.name) / "fresh"
+        with mock.patch.object(bootstrap, "run_setup",
+                               side_effect=bootstrap.BootstrapError("自检不过")):
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap.install_or_rollback(self.pkg, fresh, self.runtime)
+        # 不崩即可；首次安装没有「原来那一版」可退
+
+
 if __name__ == "__main__":
     unittest.main()

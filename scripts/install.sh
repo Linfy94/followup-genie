@@ -100,7 +100,7 @@ cat <<EOF
    （这一步必须业务本人操作）
 3) 试跑： FOLLOWUP_HOME="${HH}" python3 "${SKILL_DIR}/scripts/check_followup.py" --dry-run
 4) 注册定时任务（确认试跑结果无误后再做）：
-   hermes cron create "0 9 * * 1-5" --name "项目跟进精灵" \\
+   hermes cron create "0 9 * * *" --name "项目跟进精灵" \\
      --script followup_genie.py --no-agent
 5) 要真的写提醒事项时：把 ${FU}/config/output.json 的 reminders.write 改成 true
    然后跑一次触发 macOS 授权弹窗，点允许。

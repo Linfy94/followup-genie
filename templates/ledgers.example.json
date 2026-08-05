@@ -11,7 +11,15 @@
       "enabled": true,
 
       "source": "tencent_mcp",
-      "_source说明": "目前只实现了 tencent_mcp（腾讯文档）。lark_cli / wecom_cli 是占位，未实现。",
+      "_source说明": [
+        "支持两种数据源，写错会直接报错、不会静默跑空：",
+        "  tencent_mcp —— 腾讯文档。需要 file_id + sheet_id，凭证是 .env 的 TENCENT_DOCS_TOKEN。什么都不用装。",
+        "  lark_cli    —— 飞书多维表格。需要 base_token + table_id + profile，",
+        "                 靠外部的 lark-cli 命令行工具读（要先装 Node.js 和 lark-cli 并 auth login）。",
+        "                 完整字段见本文件末尾那个「示例飞书台账」。",
+        "两种可以混用，一份配置里既有腾讯文档台账也有飞书台账是正常的；",
+        "只用其中一种时，另一种的凭证不需要配，自检也不会要求你配。"
+      ],
       "file_id": "从腾讯文档链接里取：docs.qq.com/sheet/【这一段】",
       "sheet_id": "子表 ID，链接里 ?tab= 后面那段；不确定就先随便填，报错信息会列出所有子表",
       "ruleset": "示例规则集",
@@ -92,6 +100,73 @@
         "程序会把它和状态列/备注比对，把不一致的列出来供业务清账。",
         "底纹是格式不是数据：复制粘贴、另存、别人编辑都可能丢，任何下游工具都读不到。"
       ]
+    },
+
+    {
+      "id": "示例飞书台账",
+      "_这一条是干什么的": [
+        "数据源在飞书多维表格时的完整字段示例。判定、终止、名单那些配置",
+        "与上面那份**完全一样**（core 只认「节点→字段→阈值」这套抽象，",
+        "不关心背后是腾讯文档还是飞书），所以这里只列出不一样的部分。",
+        "不需要飞书就把整个这一条删掉。"
+      ],
+      "name": "飞书多维表格的名字",
+      "line": "业务线名字",
+      "enabled": false,
+
+      "source": "lark_cli",
+      "_前置条件": [
+        "需要 Node.js 和飞书官方的 lark-cli：",
+        "    npm install -g @larksuiteoapi/lark-cli",
+        "    lark-cli auth login",
+        "程序不会替你装，找不到时会停下来把命令打出来。",
+        "只读白名单写死在 scripts/lark_base.py 的 ALLOWED_SUBCOMMANDS：",
+        "只允许 +table-list / +field-list / +record-list 三个只读子命令。"
+      ],
+
+      "base_token": "多维表格的 base token。从分享链接里取，或用 lark-cli 解析出来",
+      "table_id": "数据表 id，形如 tblXXXXXXXXXXXX。一个 base 里每张表一个",
+      "profile": "sentinel",
+      "_profile说明": "lark-cli 的身份配置名，决定用谁的授权去读。缺了会报错，不会默默用错身份。",
+
+      "key_field": "_record_id",
+      "_key_field说明": [
+        "飞书自己的记录 id，程序会把它当成一个普通列暴露出来，永远唯一。",
+        "为什么默认用它而不是「企业名称」：同一家公司在不同分行各开一个项目很常见，",
+        "人类可读的字段不保证唯一，而主键一旦重复，催办状态就会串台。",
+        "想用业务字段当主键也可以，但那一列必须非空且唯一，否则会报错拒跑。"
+      ],
+      "name_field": "企业名称",
+
+      "link_date_fields": [
+        {
+          "link_field": "主表上那个关联字段的列名",
+          "child_table_id": "被关联的那张表的 table_id",
+          "child_date_field": "去那张表里取哪一列日期"
+        }
+      ],
+      "_link_date_fields说明": [
+        "关联字段读出来只是一串记录 id，看不到日期。这里按配置把它换成",
+        "关联记录里某个日期字段的值（多条取最早一条），这样规则里的 clock /",
+        "empty / not_empty 可以直接用这个列名，不用另写跨表逻辑。",
+        "不需要就写成 [] 或整个删掉。",
+        "⚠️ 三个键缺一不可，写错会在自检时报错——以前是直接抛一屏英文堆栈。"
+      ],
+
+      "required_columns": ["企业名称"],
+      "scope_filters": [],
+      "_scope_filters提醒": [
+        "🔴 同一个字段在不同表里写法可能不同。实测遇到过：一张表写「杭州」，",
+        "另一张写「杭州分行」。照抄另一张表的取值会一条都匹配不上、",
+        "把整表静默过滤光，而表现只是「今天没有要催的」。",
+        "每张表的取值都要单独看一眼再写。"
+      ],
+      "known_values": {},
+      "terminal_states": [],
+      "manual_terminal": [],
+      "terminal_note_exceptions": [],
+      "paused": [],
+      "gray_list_for_review": []
     }
   ]
 }

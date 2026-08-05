@@ -89,11 +89,17 @@ def _title(item) -> str:
     清单里有「业务线」「阶段」两级标题做上下文，条目可以只写企业名；
     而提醒事项是**一条一条独立弹出**的，看到时没有任何上下文。
 
-    🔴 **标题里绝不能出现天数。** 它是 `_upsert()` 认回旧提醒的唯一匹配键
-    （AppleScript 里 `if name of r is "<标题>"`）。天数每天都在涨，
-    一旦写进标题，第二天就匹配不上 → **给同一个项目再建一条新提醒**。
-    28 条 × 每天，两周后这个列表就没法用了。
-    天数放备注，每天刷新的是备注，标题保持不变。
+    🔴 **标题里绝不能出现天数。** 天数每天都在涨，写进标题就等于每天换一个
+    标题；而升级前的版本正是靠标题认回旧提醒的，那样会给同一个项目
+    每天再建一条。天数放备注，每天刷新的是备注，标题保持不变。
+
+    🔴 **但标题本身不是身份。** 同一家企业在同一条业务线上可以有多个项目
+    （台账里是不同序号的两行），它们的「业务线＋阶段＋企业名」完全一样 ——
+    靠标题匹配会把它们**合并成一条提醒**，业务只看到一个、漏掉另一个，
+    而且没有任何迹象。真正的身份是 `item.state_key`
+    （`台账|序号|节点`，与 followup_state / stage_entered 同一把钥匙），
+    它与提醒事项自身 id 的对应关系记在 `state/reminder_map.json`。
+    业务看到的标题因此保持业务定的模板，一个技术编号都不用往里塞。
     """
     return f"{MARKER}{item.line_label}「{item.stage}」{item.name}"
 
@@ -128,32 +134,112 @@ def _list_exists(name: str) -> bool:
     return _osa(script).lower() == "true"
 
 
-def _upsert(list_name: str, title: str, body: str, due: date, *, write_enabled: bool) -> str:
+MAP_FILE = "reminder_map.json"
+
+
+def _open_reminders(list_name: str) -> "list[tuple[str, str]]":
     """
-    创建或更新一条提醒。同一标题只保留一条 —— 首次推送几十条、之后每天再跑，
-    若重复创建，提醒事项列表两周内就没法用了。
+    列出该列表里所有**未完成**的提醒，返回 [(id, 标题), ...]。只读，不受写入开关管辖。
+
+    每行 `id<TAB>标题`。标题是单行文本，不含制表符与换行，所以按第一个
+    制表符切开是安全的；真遇到异常行宁可跳过，也不要猜。
     """
     script = f'''
     tell application "Reminders"
-        set tgt to missing value
+        set out to ""
         repeat with r in (reminders of list "{_esc(list_name)}")
-            if name of r is "{_esc(title)}" and completed of r is false then
+            if completed of r is false then
+                set out to out & (id of r as string) & tab & (name of r as string) & linefeed
+            end if
+        end repeat
+        return out
+    end tell
+    '''
+    pairs = []
+    for line in _osa(script).splitlines():
+        if "\t" not in line:
+            continue
+        rid, title = line.split("\t", 1)
+        if rid:
+            pairs.append((rid, title))
+    return pairs
+
+
+def _upsert(list_name: str, title: str, body: str, due: date, rid: str, *,
+            write_enabled: bool) -> "tuple[str, str]":
+    """
+    按 **提醒事项自身的 id** 创建或更新一条提醒。返回 (结果, id)。
+
+    结果是 "created" 或 "updated"。
+
+    🔴 这里**不做标题匹配**。标题不唯一（同企业同阶段的两个项目标题一样），
+    靠它匹配会把两个项目合并成一条。认领旧提醒是 `sync()` 开头一次性做完的，
+    做完之后每条 item 手里都有确定的 id 或确定没有 —— 写入阶段不再有歧义。
+
+    rid 为空 = 这条从没建过；rid 指向的提醒已被业务删除或勾选完成 = 同样重建，
+    并把新 id 记回映射（提醒只做通知、不承担状态，删了重建是正确行为）。
+    """
+    find = ""
+    if rid:
+        find = f'''
+        repeat with r in (reminders of list "{_esc(list_name)}")
+            if (id of r as string) is "{_esc(rid)}" and completed of r is false then
                 set tgt to r
                 exit repeat
             end if
         end repeat
+        '''
+    script = f'''
+    tell application "Reminders"
+        set tgt to missing value
+        {find}
         if tgt is missing value then
-            make new reminder at end of list "{_esc(list_name)}" with properties ¬
+            set newR to make new reminder at end of list "{_esc(list_name)}" with properties ¬
                 {{name:"{_esc(title)}", body:"{_esc(body)}", ¬
                   due date:date "{due.strftime('%Y-%m-%d')}"}}
-            return "created"
+            return "created" & tab & (id of newR as string)
         else
             set body of tgt to "{_esc(body)}"
-            return "updated"
+            set name of tgt to "{_esc(title)}"
+            return "updated" & tab & (id of tgt as string)
         end if
     end tell
     '''
-    return _osa_write(script, write_enabled=write_enabled)
+    raw = _osa_write(script, write_enabled=write_enabled)
+    result, _, new_rid = raw.partition("\t")
+    return result.strip(), new_rid.strip()
+
+
+def _adopt_existing(items: list, mapping: dict, list_name: str) -> int:
+    """
+    把升级前建好的旧提醒认领进映射，避免升级当天**整批重建一遍**。
+
+    旧版本靠标题匹配，所以现存提醒的标题正好等于我们现在会生成的标题。
+    按标题认一次即可，认完之后一律走 id。
+
+    🔴 一个 id 只能被认领一次（`claimed`）。少了这一条，同企业同阶段的
+    两个项目会双双认领同一条旧提醒 —— 两个键指向同一个 id，
+    每天互相覆盖备注，业务永远只看得到一条。这正是本次要修的病，
+    在认领这一步同样会犯。第二个项目认不到就会新建，恰好把历史遗留的
+    合并状态自动拆开。
+
+    返回认领了几条。
+    """
+    unmapped = [it for it in items if not mapping.get(it.state_key)]
+    if not unmapped:
+        return 0
+    claimed = set(mapping.values())
+    by_title: dict = {}
+    for rid, title in _open_reminders(list_name):
+        if rid not in claimed:
+            by_title.setdefault(title, []).append(rid)
+    adopted = 0
+    for it in unmapped:
+        bucket = by_title.get(_title(it))
+        if bucket:
+            mapping[it.state_key] = bucket.pop(0)
+            adopted += 1
+    return adopted
 
 
 def sync(items: list, output_cfg: dict, today: date, stream=None) -> None:
@@ -198,10 +284,22 @@ def sync(items: list, output_cfg: dict, today: date, stream=None) -> None:
         print(f"⚠️ 提醒事项不可用：{e}", file=sys.stderr)
         return
 
+    mapping = core.read_state(MAP_FILE) or {}
+    try:
+        adopted = _adopt_existing(items, mapping, list_name)
+    except (RuntimeError, WriteBlocked) as e:
+        # 认领失败不该让整轮同步停下 —— 最坏结果是这次全部当新的建，
+        # 而那正是升级前的行为，不是倒退。
+        print(f"⚠️ 读取现有提醒失败，本轮按新建处理：{e}", file=sys.stderr)
+        adopted = 0
+
     created = updated = failed = 0
     for it in items:
         try:
-            r = _upsert(list_name, _title(it), _body(it), today, write_enabled=True)
+            r, rid = _upsert(list_name, _title(it), _body(it), today,
+                             mapping.get(it.state_key, ""), write_enabled=True)
+            if rid:
+                mapping[it.state_key] = rid
             if r == "created":
                 created += 1
             else:
@@ -210,7 +308,13 @@ def sync(items: list, output_cfg: dict, today: date, stream=None) -> None:
             failed += 1
             if failed == 1:
                 print(f"⚠️ 提醒写入失败：{e}", file=sys.stderr)
+
+    # 映射只增不减。哪怕某个项目今天不催了，也留着它的 id ——
+    # 明天它再超期时才认得回原来那条，不会重建。
+    core.write_state(MAP_FILE, mapping)
+
     print(f"\n📌 提醒事项：新建 {created}、更新 {updated}"
+          + (f"、认领旧提醒 {adopted}" if adopted else "")
           + (f"、失败 {failed}" if failed else ""), file=out)
 
 

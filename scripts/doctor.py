@@ -20,6 +20,7 @@ from datetime import date, datetime
 
 import core
 import qqdoc
+import lark_base
 from core import LedgerError
 
 OK, WARN, BAD = "✅", "⚠️ ", "🔴"
@@ -119,11 +120,11 @@ def check_configs(doc: Doc) -> tuple[dict, dict, dict] | None:
                     n.get("_禁用原因") or "配置里 enabled=false")
         # 阈值与复提醒必填
         for n in on:
-            thr = (n.get("threshold") or {}).get("days")
+            thr = n.get("threshold") or {}
             rep = n.get("repeat") or {}
-            if not thr:
-                doc.add(BAD, f"节点「{n.get('name')}」缺 threshold.days")
-            if not (rep.get("days") or rep.get("workdays")):
+            if not ("days" in thr or "workdays" in thr):
+                doc.add(BAD, f"节点「{n.get('name')}」缺 threshold.days/workdays")
+            if not (rep.get("days") or rep.get("workdays") or rep.get("weekday")):
                 doc.add(BAD, f"节点「{n.get('name')}」缺 repeat（复提醒间隔）",
                         "不允许默认成「只催一次」")
 
@@ -140,12 +141,20 @@ def check_configs(doc: Doc) -> tuple[dict, dict, dict] | None:
                 rows.append(f"{n.get('name'):<10} boundary={b!r} 🔴 不合法")
                 continue
             rep = n.get("repeat") or {}
-            every = (f"每 {rep['workdays']} 个工作日" if rep.get("workdays")
-                     else f"每 {rep.get('days')} 天" if rep.get("days") else "—")
+            if rep.get("weekday"):
+                every = f"只在每周{rep['weekday']}提醒"
+            elif rep.get("workdays"):
+                every = f"每 {rep['workdays']} 个工作日"
+            elif rep.get("days"):
+                every = f"每 {rep['days']} 天"
+            else:
+                every = "—"
             mark = "" if n.get("enabled") else "（未启用）"
+            unit = "个工作日" if "workdays" in thr else "天"
+            amount = thr.get("workdays") if "workdays" in thr else thr.get("days")
             rows.append(
-                f"{n.get('name', '?'):<10} 在本节点满 {thr.get('days')} 天 → "
-                f"第 {core.first_reminder_day(n)} 天首次提醒（显示「超期 1 天」），"
+                f"{n.get('name', '?'):<10} 在本节点满 {amount} {unit} → "
+                f"第 {core.first_reminder_day(n)} {unit}首次提醒（显示「超期 1 天」），"
                 f"之后{every}{mark}"
             )
         rows.append("")
@@ -192,7 +201,22 @@ def check_configs(doc: Doc) -> tuple[dict, dict, dict] | None:
     return ledgers_cfg, rules_cfg, output_cfg
 
 
+def needs_tencent_token(enabled_ledgers: list) -> bool:
+    """
+    这台机器到底要不要腾讯文档凭证。
+
+    🔴 纯飞书用户没有、也不该有 TENCENT_DOCS_TOKEN。以前这里无条件查，
+    会给他一条红色的「腾讯文档凭证缺失」—— 自检报红是最强的「别用」信号，
+    业务会卡在一个跟他完全无关的东西上。
+
+    注意默认值：source 缺省是 tencent_mcp，所以没写 source 的台账算腾讯文档。
+    """
+    return any(l.get("source", "tencent_mcp") == "tencent_mcp"
+               for l in enabled_ledgers if isinstance(l, dict))
+
+
 def check_credential(doc: Doc) -> bool:
+    """腾讯文档凭证。只影响 source=tencent_mcp 的台账。"""
     try:
         qqdoc.load_token()
     except LedgerError as e:
@@ -203,19 +227,37 @@ def check_credential(doc: Doc) -> bool:
     return True
 
 
+def check_lark_credential(doc: Doc, ledger: dict) -> bool:
+    """飞书 lark-cli 身份。只影响 source=lark_cli 的台账，每个 profile 查一次即可。"""
+    profile = ledger.get("profile", "sentinel")
+    try:
+        lark_base.check_credential(ledger["base_token"], profile)
+    except LedgerError as e:
+        doc.add(BAD, f"飞书身份（profile={profile}）不可用", f"{e}\n"
+                "🔴 注意：这会表现成「今天没有超时单」，不是正常状态。"
+                "多半是 lark-cli 的这个 profile 需要重新 auth login。")
+        return False
+    doc.add(OK, f"飞书身份（profile={profile}）可用", "（内容不打印）")
+    return True
+
+
 def check_ledger(doc: Doc, ledger: dict, rules_cfg: dict) -> None:
     name = ledger.get("name")
-    try:
-        fp_before = qqdoc.file_fingerprint(ledger["file_id"])
-    except LedgerError as e:
-        doc.add(BAD, f"台账「{name}」不可访问",
-                f"{e}\n🔴 这是故障，不是「今天没有超时单」")
-        return
-    doc.add(OK, f"台账「{name}」可访问",
-            f"最后修改：{fp_before.get('last_modify_name')} / {fp_before.get('last_modify_time')}")
+    source = ledger.get("source", "tencent_mcp")
+    fp_before = None
+
+    if source == "tencent_mcp":
+        try:
+            fp_before = qqdoc.file_fingerprint(ledger["file_id"])
+        except LedgerError as e:
+            doc.add(BAD, f"台账「{name}」不可访问",
+                    f"{e}\n🔴 这是故障，不是「今天没有超时单」")
+            return
+        doc.add(OK, f"台账「{name}」可访问",
+                f"最后修改：{fp_before.get('last_modify_name')} / {fp_before.get('last_modify_time')}")
 
     try:
-        sheet = qqdoc.read_sheet(ledger["file_id"], ledger["sheet_id"])
+        sheet = core.read_ledger_sheet(ledger)
     except LedgerError as e:
         doc.add(BAD, f"台账「{name}」读取失败", str(e))
         return
@@ -247,9 +289,14 @@ def check_ledger(doc: Doc, ledger: dict, rules_cfg: dict) -> None:
             doc.add(WARN, "台账还没有「终止」列",
                     "当前冷启动策略下它是业务唯一的退出阀门（改终止 或 推进节点）。\n"
                     "缺它的话，业务遇到「想让某条别催了」时没有正确的表达方式。\n"
-                    f"台账 owner：{fp_before.get('last_modify_name')}")
+                    + (f"台账 owner：{fp_before.get('last_modify_name')}" if fp_before else ""))
 
-    # 只读性验证：读了一整轮，确认没动过
+    # 只读性验证：读了一整轮，确认没动过。lark_cli 暂无等价指纹，只能报出来。
+    if source != "tencent_mcp":
+        doc.add(WARN, f"台账「{name}」只读性验证未实现",
+                f"数据源 {source} 暂无「最后修改人/时间」等价指纹可核对，"
+                f"只依赖 lark_base.py 的只读命令白名单（table-list/field-list/record-list）")
+        return
     try:
         fp_after = qqdoc.file_fingerprint(ledger["file_id"])
     except LedgerError as e:
@@ -471,10 +518,31 @@ def main() -> int:
     ledgers_cfg, rules_cfg, output_cfg = cfgs
 
     if not args.validate_config:
-        if check_credential(doc):
-            for ledger in ledgers_cfg.get("ledgers", []):
-                if ledger.get("enabled"):
-                    check_ledger(doc, ledger, rules_cfg)
+        enabled = [l for l in ledgers_cfg.get("ledgers", [])
+                   if isinstance(l, dict) and l.get("enabled")]
+        # 🔴 只有真的有腾讯文档台账时才查腾讯凭证。
+        #    纯飞书用户没有、也不该有 TENCENT_DOCS_TOKEN，
+        #    而以前这里无条件查，会给他一条红色的「凭证缺失」——
+        #    自检报红是最强的「别用」信号，业务会卡在一个和他无关的东西上。
+        needs_tencent = needs_tencent_token(enabled)
+        tencent_ok = check_credential(doc) if needs_tencent else True
+        if not needs_tencent:
+            doc.add(OK, "腾讯文档凭证：本机没有腾讯文档台账，无需配置")
+        lark_ok: dict[str, bool] = {}  # profile -> 是否可用，避免同一 profile 重复查
+        for ledger in ledgers_cfg.get("ledgers", []):
+            if not ledger.get("enabled"):
+                continue
+            source = ledger.get("source", "tencent_mcp")
+            if source == "tencent_mcp":
+                if not tencent_ok:
+                    continue  # 已经在 check_credential 报过一次，不用再报
+            elif source == "lark_cli":
+                profile = ledger.get("profile", "sentinel")
+                if profile not in lark_ok:
+                    lark_ok[profile] = check_lark_credential(doc, ledger)
+                if not lark_ok[profile]:
+                    continue
+            check_ledger(doc, ledger, rules_cfg)
         check_reminders(doc, output_cfg)
         check_wecom(doc, output_cfg)
         check_alert(doc, output_cfg)
