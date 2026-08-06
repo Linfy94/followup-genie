@@ -86,7 +86,31 @@ def _child_path(exe: str) -> str:
     return ":".join(out)
 
 
-AGENT_CONTEXT_VARS = ("HERMES_HOME", "OPENCLAW_HOME")
+# ── lark-cli 的 Agent context 探测信号 ──────────────────────────────────
+# 命中其中任意一个，lark-cli 就拒绝执行并报
+# "hermes context detected but lark-cli is not bound to it"。
+#
+# 🔴 这张清单是**实测枚举**出来的，不是照抄文档。做法是同一个二进制、
+#    同一台机器、同一秒，唯一变量是某一个环境变量，逐个跑
+#    `lark-cli config show` 看是否报错。
+#
+# 🔴 **不要改成 `HERMES_*` 前缀通配。** 实测编造的 `HERMES_ZZZ_BUKEN`
+#    并不触发，通配等于凭空猜上游语义，会把无关变量一起剔掉。
+#
+# 🔴 **上游新增探测变量时会原样复发**，而症状是「今天没有要催的」。
+#    0.4.0-rc2 只剔了前两个就宣告修复，结果 rc4 又栽在 HERMES_EXEC_ASK 上。
+#    当时的验证方法是查 gateway 进程的环境 —— 但 `ps eww` 只显示 exec 时的
+#    初始环境，而这些变量是进程起来之后在 Python 里 `os.environ[...] = ...`
+#    塞进去的（gateway/run.py 的 HERMES_EXEC_ASK、cli.py 的 HERMES_QUIET）。
+#    **看进程环境快照 ≠ 看子进程真正拿到的环境。**
+AGENT_CONTEXT_VARS = (
+    "HERMES_HOME",
+    "OPENCLAW_HOME",
+    "HERMES_EXEC_ASK",       # gateway/run.py 模块级无条件注入 —— rc4 的真凶
+    "HERMES_GATEWAY_TOKEN",
+    "HERMES_SESSION_KEY",
+    "HERMES_QUIET",          # cli.py 模块级无条件注入
+)
 
 
 def _child_env(exe: str) -> dict:
