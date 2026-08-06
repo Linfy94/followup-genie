@@ -21,6 +21,14 @@ import check_followup  # noqa: E402
 TODAY = date(2026, 7, 20)
 
 
+class _proc:
+    """最小的 CompletedProcess 替身，只带 _cli_output 关心的两个字段。"""
+
+    def __init__(self, stderr="", stdout=""):
+        self.stderr = stderr
+        self.stdout = stdout
+
+
 def overdue_sheet():
     return make_sheet([
         row(1, "甲公司", tech="待收资", reported=days_ago(TODAY, 40),
@@ -52,6 +60,24 @@ class AlertTest(unittest.TestCase):
             h = read_state(home, "health.json")
             self.assertIs(h["alert_ok"], False)
             self.assertIn("退出码 3", h["alert_detail"])
+
+    def test_failure_detail_keeps_stderr(self):
+        r = check_followup._cli_output(_proc(stderr="boom from stderr", stdout=""))
+        self.assertIn("stderr=boom from stderr", r)
+
+    def test_failure_detail_keeps_stdout_too(self):
+        """
+        🔴 2026-08-06 09:00：hermes send 退出码 1，**stderr 为空**，
+           旧实现只看 stderr → health.json 里只留「退出码 1」，无从查起。
+           错误信息很可能一直在 stdout 里，只是被丢掉了。
+        """
+        r = check_followup._cli_output(_proc(stderr="", stdout="boom from stdout"))
+        self.assertIn("stdout=boom from stdout", r)
+
+    def test_failure_detail_says_so_when_both_empty(self):
+        """两个都空也要明说，不能留一句光秃秃的退出码让人以为细节没记全。"""
+        r = check_followup._cli_output(_proc(stderr="", stdout=""))
+        self.assertIn("无输出", r)
 
     def test_hermes_not_on_path_is_loud(self):
         """

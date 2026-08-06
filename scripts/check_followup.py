@@ -60,6 +60,27 @@ def _hermes_bin() -> str | None:
     return None
 
 
+def _cli_output(r, limit: int = 300) -> str:
+    """
+    把一次子进程调用的可见输出整理成一句可查的话。
+
+    🔴 2026-08-06 09:00 的真实教训：`hermes send` 退出码 1 且 **stderr 为空**，
+    而旧实现只在 stderr 非空时附加细节 —— health.json 里只留下一句
+    「退出码 1」，事后完全无从查起。**错误信息很可能一直在 stdout 里，
+    只是被丢掉了。**
+
+    退出码本身几乎不携带信息，能查的东西都在输出里。两个都空时也要明说
+    「无输出」，而不是留一句光秃秃的退出码让人以为细节没记全。
+    """
+    parts = []
+    for label, raw in (("stderr", getattr(r, "stderr", "")),
+                       ("stdout", getattr(r, "stdout", ""))):
+        text = (raw or "").strip()
+        if text:
+            parts.append(f"{label}={text[:limit]}")
+    return " | ".join(parts) if parts else "无输出（stderr 与 stdout 都是空的）"
+
+
 def alert(text: str, output_cfg: dict, *, stream=None) -> tuple[bool, str]:
     """
     故障告警走 telegram。返回 (成功?, 说明)。
@@ -109,8 +130,7 @@ def alert(text: str, output_cfg: dict, *, stream=None) -> tuple[bool, str]:
     else:
         if r.returncode == 0:
             return True, "ok"
-        detail = (f"hermes send 退出码 {r.returncode}"
-                  + (f"：{(r.stderr or '').strip()[:300]}" if r.stderr else ""))
+        detail = f"hermes send 退出码 {r.returncode}：{_cli_output(r)}"
 
     print(f"🔴 故障告警发送失败：{detail}\n   原本要告警的内容：{text[:200]}", file=out)
     return False, detail
