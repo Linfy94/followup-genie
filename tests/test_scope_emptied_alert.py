@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
+from unittest import mock
 
 from harness import (make_sheet, row, days_ago, temp_home, run_main,  # noqa: I001
                      read_state)
+import check_followup
 
 TODAY = date(2026, 7, 20)
 
@@ -53,6 +55,19 @@ class ScopeEmptiedAlertTest(unittest.TestCase):
             run_main([f"--today={TODAY}", "--force-push"], all_out_of_scope())
             second = run_main([f"--today={TODAY}", "--force-push"], all_out_of_scope())
             self.assertFalse(any(ALERT_MARK in " ".join(a) for a in second.alerts))
+
+    def test_failed_alert_is_retried_and_not_deduplicated(self):
+        """告警没发出去不能登记为已告警，否则故障会永久静默。"""
+        with temp_home() as home:
+            with mock.patch.object(check_followup, "alert",
+                                   return_value=(False, "模拟发送失败")) as send:
+                run_main([f"--today={TODAY}", "--force-push"], all_out_of_scope())
+                run_main([f"--today={TODAY}", "--force-push"], all_out_of_scope())
+            self.assertEqual(send.call_count, 2,
+                             "第一次没发出去，下一次真实运行必须重试")
+            health = read_state(home, "health.json")
+            self.assertNotIn("scope_emptied", health,
+                             "发送失败不能写进已告警去重登记")
 
     def test_alerts_again_after_recovery(self):
         """恢复后再次落空要重新告警，否则第二次故障永远静默。"""

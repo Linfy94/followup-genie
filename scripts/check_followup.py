@@ -330,8 +330,9 @@ def _watch_scope_emptied(reports: list[core.Report], output_cfg: dict) -> None:
        塞进去会让每天都少一次成功记录，两天后看门狗误报「任务根本没跑」——
        修好一个静默，换来一个假警报。节假日闸门当初踩的就是这个坑。
 
-    去重沿用状态文件损坏那套「登记 → 告警 → 记恢复事件」：变成空的那天告警一次，
-    一直空着不再重复，恢复了记一笔并清掉登记，下次再空还会重新告警。
+    去重沿用状态文件损坏那套「告警成功后登记 → 记恢复事件」：变成空的那天
+    告警成功一次，一直空着不再重复；**发送失败不登记，下一次真实运行必须重试**。
+    恢复后记一笔并清掉登记，下次再空还会重新告警。
     """
     emptied = {r.ledger_id: r.ledger_name for r in reports
                if r.total_rows > 0 and r.in_scope_rows == 0}
@@ -342,6 +343,7 @@ def _watch_scope_emptied(reports: list[core.Report], output_cfg: dict) -> None:
     new = [lid for lid in emptied if lid not in known]
     recovered = [lid for lid in known if lid not in emptied]
 
+    notified_new: set[str] = set()
     if new:
         lines = "\n".join(
             f"· {emptied[lid]}（{lid}）：整表都在责任范围外" for lid in new)
@@ -352,9 +354,15 @@ def _watch_scope_emptied(reports: list[core.Report], output_cfg: dict) -> None:
               "请核对 ledgers.json 的 scope_filters。",
             output_cfg)
         core.update_health(alert_ok=ok, alert_detail=why)
+        if ok:
+            notified_new = set(new)
 
-    if new or recovered:
-        registry = {lid: known.get(lid) or core.now_iso() for lid in emptied}
+    if notified_new or recovered:
+        registry = {
+            lid: known.get(lid) or core.now_iso()
+            for lid in emptied
+            if lid in known or lid in notified_new
+        }
         fields = {"scope_emptied": registry}
         if recovered:
             fields["last_scope_recovery"] = {
