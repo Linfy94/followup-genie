@@ -172,6 +172,51 @@ class HealthRecordTest(unittest.TestCase):
             self.assertIsNone(read_state(home, "health.json"))
 
 
+class AlertTimeoutConfigTest(unittest.TestCase):
+    """
+    🔴 告警函数**只在已经出事时**被调用。让它因为一个配置笔误裸崩，
+       等于把「有故障」升级成「主脚本崩掉、连故障是什么都说不出来」。
+       离线校验是第一道，运行时兜底是第二道，两道都要有。
+    """
+
+    def _send(self, timeout_value):
+        from unittest import mock
+        with temp_home():
+            with mock.patch.object(check_followup, "_hermes_bin",
+                                   return_value="/usr/local/bin/hermes"), \
+                 mock.patch.object(check_followup.subprocess, "run",
+                                   return_value=mock.Mock(returncode=0, stdout="", stderr="")):
+                return check_followup.alert(
+                    "测试", output_cfg(alert={"enabled": True,
+                                              "timeout_seconds": timeout_value}))
+
+    def test_non_numeric_timeout_does_not_crash(self):
+        ok, _ = self._send("三十")
+        self.assertTrue(ok, "配置写错也要把告警发出去")
+
+    def test_zero_and_negative_fall_back_to_default(self):
+        for bad in (0, -5):
+            with self.subTest(bad=bad):
+                ok, _ = self._send(bad)
+                self.assertTrue(ok)
+
+    def test_valid_value_is_used(self):
+        self.assertEqual(
+            check_followup._alert_timeout({"timeout_seconds": "45"}, None), 45)
+
+    def test_missing_value_uses_default(self):
+        self.assertEqual(
+            check_followup._alert_timeout({}, None),
+            check_followup.ALERT_TIMEOUT_DEFAULT)
+
+    def test_offline_check_catches_it_too(self):
+        """第一道：doctor --validate-config 必须先拦下来，不能报「通过」。"""
+        import core
+        errs = core.validate_configs(
+            {}, {}, {"alert": {"timeout_seconds": "三十"}})
+        self.assertTrue(any("timeout_seconds" in e for e in errs), errs)
+
+
 class AlertRetryTest(unittest.TestCase):
     """
     告警撞上几十秒的网络抖动就整条丢掉——2026-08-06 09:00 真实发生。

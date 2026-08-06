@@ -380,6 +380,22 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
         if v is not None and not isinstance(v, dict):
             errs.append(f"output.json 的 {seg} 应该是对象，实际是{_type_name(v)}")
 
+    # 告警超时。写错的后果比一般配置更重 —— 它只在**已经出事**时被读到，
+    # 那一刻裸崩等于「有故障」升级成「连故障是什么都说不出来」。
+    # check_followup._alert_timeout() 还有一道运行时兜底，两道都要有。
+    alert_seg = output.get("alert")
+    if isinstance(alert_seg, dict):
+        raw = alert_seg.get("timeout_seconds")
+        if raw is not None and raw != "":
+            try:
+                if int(raw) <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errs.append(
+                    f"output.json 的 alert.timeout_seconds＝{raw!r} 不是正整数。"
+                    "填秒数，比如 30。"
+                )
+
     return errs
 
 

@@ -77,6 +77,32 @@ def _hermes_bin() -> str | None:
 ALERT_RETRY_BACKOFF = (2, 5, 0)
 
 
+ALERT_TIMEOUT_DEFAULT = 30
+
+
+def _alert_timeout(cfg: dict, out) -> int:
+    """
+    取告警超时秒数。配置写错时退回默认值继续告警，**绝不裸崩**。
+
+    🔴 这里必须兜底，而不是「反正 doctor 会拦」：本函数只在**已经出事**时
+    被调用。让它因为一个配置笔误抛 ValueError，等于把「有故障」升级成
+    「主脚本崩掉、连故障是什么都说不出来」—— 最该说话的时候哑了。
+    离线校验（core.validate_config）是第一道，这是第二道，两道都要有。
+    """
+    raw = cfg.get("timeout_seconds")
+    if raw is None or raw == "":
+        return ALERT_TIMEOUT_DEFAULT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        print(f"⚠️ output.json 的 alert.timeout_seconds＝{raw!r} 不是正整数，"
+              f"本次按默认 {ALERT_TIMEOUT_DEFAULT} 秒发送告警。", file=out)
+        return ALERT_TIMEOUT_DEFAULT
+    return value
+
+
 def _cli_output(r, limit: int = 300) -> str:
     """
     把一次子进程调用的可见输出整理成一句可查的话。
@@ -134,7 +160,7 @@ def alert(text: str, output_cfg: dict, *, stream=None) -> tuple[bool, str]:
               file=out)
         return False, detail
 
-    timeout = int(cfg.get("timeout_seconds") or 30)
+    timeout = _alert_timeout(cfg, out)
     attempts = []
     for i, wait in enumerate(ALERT_RETRY_BACKOFF, start=1):
         try:
@@ -288,6 +314,52 @@ def _headline(in_scope: int, due_count: int, groups: list[dict]) -> list[str]:
             + (f"（{share}）" if share else "")
         )
     return lines
+
+
+def _watch_scope_emptied(reports: list[core.Report], output_cfg: dict) -> None:
+    """
+    整张台账被责任范围过滤光 —— 告警一次，恢复时记一次，绝不天天念。
+
+    🔴 只在报告里写一行是不够的（0.4.0-rc4 就只做到这一步）：那一刻待催数是 0，
+       企微「无事不发」、告警通道碰不到、看门狗只看到「任务成功了」。
+       **没人主动翻本地日志，这条业务线就已经全量失效而无人知晓** ——
+       又变回它本要消灭的那个形状。
+
+    🔴 但它**绝不能进 run_warnings**：`exit_code == 0 and not run_warnings`
+       才写 last_full_success，而看门狗靠 last_full_success 判断「任务有没有跑」。
+       塞进去会让每天都少一次成功记录，两天后看门狗误报「任务根本没跑」——
+       修好一个静默，换来一个假警报。节假日闸门当初踩的就是这个坑。
+
+    去重沿用状态文件损坏那套「登记 → 告警 → 记恢复事件」：变成空的那天告警一次，
+    一直空着不再重复，恢复了记一笔并清掉登记，下次再空还会重新告警。
+    """
+    emptied = {r.ledger_id: r.ledger_name for r in reports
+               if r.total_rows > 0 and r.in_scope_rows == 0}
+    known = core.read_health().get("scope_emptied") or {}
+    if not isinstance(known, dict):
+        known = {}  # 状态被写坏时退回「谁都没登记过」，大不了多告一次警
+
+    new = [lid for lid in emptied if lid not in known]
+    recovered = [lid for lid in known if lid not in emptied]
+
+    if new:
+        lines = "\n".join(
+            f"· {emptied[lid]}（{lid}）：整表都在责任范围外" for lid in new)
+        ok, why = alert(
+            "🔴 项目跟进精灵：有业务线被责任范围整表过滤掉了\n\n" + lines
+            + "\n\n台账里的过滤字段可能换了写法（比如「深圳分行」改成「深圳」），"
+              "配置没跟上就会全表落空 —— 表现和「今天没有要催的」一模一样。"
+              "请核对 ledgers.json 的 scope_filters。",
+            output_cfg)
+        core.update_health(alert_ok=ok, alert_detail=why)
+
+    if new or recovered:
+        registry = {lid: known.get(lid) or core.now_iso() for lid in emptied}
+        fields = {"scope_emptied": registry}
+        if recovered:
+            fields["last_scope_recovery"] = {
+                "at": core.now_iso(), "ledgers": recovered}
+        core.update_health(**fields)
 
 
 def _problems(rep: core.Report) -> list[str]:
@@ -678,6 +750,9 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
             return 1
     elif real_run:
         core.update_health(last_fetch_ok=core.now_iso())
+
+    if real_run:
+        _watch_scope_emptied(reports, output_cfg)
 
     total_due = sum(len(r.due) for r in reports)
     read_count = sum(r.total_rows for r in reports)
