@@ -172,6 +172,59 @@ class HealthRecordTest(unittest.TestCase):
             self.assertIsNone(read_state(home, "health.json"))
 
 
+class AlertRetryTest(unittest.TestCase):
+    """
+    告警撞上几十秒的网络抖动就整条丢掉——2026-08-06 09:00 真实发生。
+
+    同一天 09:07 每日新闻的推送遇到同样的 `httpx.ConnectError`，
+    日志写着 `retrying in 1s (attempt 1/3)`，重试后送达。
+    同一个网络，有重试的成功、没重试的失败。
+    """
+
+    def _alert(self, results):
+        """results: 每次调用的 returncode 序列。返回 (成功?, 说明, 实际调用次数)。"""
+        from unittest import mock
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            rc = results[len(calls)] if len(calls) < len(results) else 0
+            calls.append(cmd)
+            return mock.Mock(returncode=rc, stdout="", stderr="" if rc == 0 else "boom")
+
+        with temp_home():
+            with mock.patch.object(check_followup, "_hermes_bin",
+                                   return_value="/usr/local/bin/hermes"), \
+                 mock.patch.object(check_followup.subprocess, "run", side_effect=fake_run), \
+                 mock.patch("time.sleep", lambda _s: None):
+                ok, detail = check_followup.alert("测试内容", output_cfg())
+        return ok, detail, len(calls)
+
+    def test_first_attempt_success_does_not_retry(self):
+        ok, detail, n = self._alert([0])
+        self.assertTrue(ok)
+        self.assertEqual(n, 1, "成功了就不该多打扰一次")
+        self.assertEqual(detail, "ok")
+
+    def test_transient_failure_is_retried_and_recovers(self):
+        """今早那个场景：第一次撞上抖动，第二次就好了。"""
+        ok, detail, n = self._alert([1, 0])
+        self.assertTrue(ok)
+        self.assertEqual(n, 2)
+        self.assertIn("第2次成功", detail)
+
+    def test_gives_up_after_three_and_reports_every_attempt(self):
+        ok, detail, n = self._alert([1, 1, 1])
+        self.assertFalse(ok)
+        self.assertEqual(n, 3, "三次就收手，不能在 cron 里无限重试")
+        for i in ("第1次", "第2次", "第3次"):
+            self.assertIn(i, detail, "每次的原因都要留下，否则还是查不了")
+
+    def test_retry_never_turns_failure_into_success(self):
+        """0.3.0-rc1 的老护栏：发不出去就是发不出去，不许记成已通知。"""
+        ok, _, _ = self._alert([1, 1, 1])
+        self.assertFalse(ok)
+
+
 class HermesBinTest(unittest.TestCase):
     def test_finds_hermes_via_which(self):
         import shutil

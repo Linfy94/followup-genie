@@ -31,6 +31,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 from datetime import date
 
 import core
@@ -58,6 +59,22 @@ def _hermes_bin() -> str | None:
         if cand.exists():
             return str(cand)
     return None
+
+
+# 告警重试节律：三次尝试，失败后分别等 2s、5s，最后一次不再等。
+#
+# 🔴 依据是实测，不是拍脑袋。2026-08-06 09:00 告警失败，日志显示同一分钟内
+#    Telegram 有一段约 50 秒的网络抖动（09:00:38 ~ 09:01:30 httpx.ConnectError）。
+#    对照：告警成功的 08-03/04/05 三天，同一时间窗内网络错误数都是 0。
+#
+#    真正说明问题的是同一天 09:07:23 的这一行——
+#      [Telegram] Network error on send (attempt 1/3), retrying in 1s
+#    每日新闻的推送撞上同样的网络错误，**因为它重试了三次所以送达了**。
+#    同一天、同一个网络，有重试的成功、没重试的失败。
+#
+#    告警是「业务完全收不到催办」时最后一道让人知情的机制。它自己被一次
+#    几十秒的网络抖动打掉，正是这个项目一路在消灭的那类静默失败。
+ALERT_RETRY_BACKOFF = (2, 5, 0)
 
 
 def _cli_output(r, limit: int = 300) -> str:
@@ -118,20 +135,25 @@ def alert(text: str, output_cfg: dict, *, stream=None) -> tuple[bool, str]:
         return False, detail
 
     timeout = int(cfg.get("timeout_seconds") or 30)
-    try:
-        r = subprocess.run(
-            [exe, "send", "-t", target, "-q", text],
-            capture_output=True, text=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        detail = f"hermes send 超时（{timeout}s）"
-    except Exception as e:  # noqa: BLE001 —— 告警失败不能让主流程崩
-        detail = f"{type(e).__name__}: {e}"
-    else:
-        if r.returncode == 0:
-            return True, "ok"
-        detail = f"hermes send 退出码 {r.returncode}：{_cli_output(r)}"
+    attempts = []
+    for i, wait in enumerate(ALERT_RETRY_BACKOFF, start=1):
+        try:
+            r = subprocess.run(
+                [exe, "send", "-t", target, "-q", text],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            attempts.append(f"第{i}次：超时（{timeout}s）")
+        except Exception as e:  # noqa: BLE001 —— 告警失败不能让主流程崩
+            attempts.append(f"第{i}次：{type(e).__name__}: {e}")
+        else:
+            if r.returncode == 0:
+                return True, "ok" if i == 1 else f"ok（第{i}次成功）"
+            attempts.append(f"第{i}次：退出码 {r.returncode}，{_cli_output(r)}")
+        if wait:
+            time.sleep(wait)
 
+    detail = "hermes send 连续失败 —— " + "；".join(attempts)
     print(f"🔴 故障告警发送失败：{detail}\n   原本要告警的内容：{text[:200]}", file=out)
     return False, detail
 
