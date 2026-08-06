@@ -1965,6 +1965,27 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
         else:
             rep.overdue_muted.append(item)
 
+    # 责任范围把整张台账过滤光了 —— 报一声，别让它长得像「今天没有要催的」。
+    #
+    # 🔴 2026-08-06 真踩过：业务把「分行」从「深圳分行」改成「深圳」，
+    #    而 scope_filters 里写的还是带后缀的写法，于是 AI体检 / GEO 两条线
+    #    唯一那行被判成范围外，推送里显示「总任务量：0 个项目里，0 个要催办」。
+    #    known_values 只校验状态列，scope_filters 的取值一直没有任何校验。
+    #
+    # 🔴 只报数据质量警告，**不报故障、不改退出码**：「今天这条线确实一个
+    #    项目都不在责任范围内」是完全合法的状态（新线刚接入时就是），
+    #    报错会制造狼来了。
+    if rep.total_rows > 0 and rep.in_scope_rows == 0:
+        seen = "、".join(f"{k} {v} 行" for k, v in
+                         sorted(rep.out_of_scope_detail.items(), key=lambda kv: -kv[1]))
+        rep.warnings.append(
+            f"整张台账都被责任范围过滤掉了（{rep.total_rows} 行全部判为范围外）。"
+            f"实际观测到的取值：{seen or '(无)'}。"
+            "请确认 scope_filters 的写法是否还匹配台账现状 —— "
+            "台账里换个写法（比如「深圳分行」改成「深圳」）就会全表落空，"
+            "而表现和「今天没有要催的」一模一样。"
+        )
+
     # stage_entered 已在主循环里逐行落盘（起点一算出就 setdefault），
     # 这里不再补写 —— 补写会把未超期项目的起点误设为今天。
     return rep, {"date": iso(today), "nodes": snapshot}
