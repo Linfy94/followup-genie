@@ -355,6 +355,12 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
                         errs.append(
                             f"{where}的 clock.fallback 必须是非空字符串或非空字符串数组，"
                             f"实际是 {fallback!r}")
+                # 复提醒节律：只对启用的节点查（未启用的节点允许字段不全）。
+                # 🔴 这一道是**离线**的 —— 2026-08-10 之前 repeat 只在
+                #    assert_sheet 里查，而那要真读到台账才跑，于是
+                #    `doctor --validate-config` 对着一个会炸的配置报「全部通过」。
+                if n.get("enabled") and isinstance(n.get("repeat"), (dict, type(None))):
+                    errs.extend(repeat_errors(n.get("repeat"), where))
                 thr = n.get("threshold")
                 if thr is None:
                     continue          # 未启用的节点可以没有阈值，doctor 另有检查
@@ -1362,44 +1368,9 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     for node in ruleset.get("nodes", []):
         if not node.get("enabled"):
             continue
-        rep = node.get("repeat") or {}
-        forms = [k for k in repeat_forms if rep.get(k)]
-        if not forms:
-            a.fatal.append(
-                f"节点「{node.get('name')}」缺少 repeat（复提醒间隔）。"
-                f"不允许默认成「只催一次」，请在 rules.json 里补上。"
-                f"可用写法：days / workdays / weekday / monthday。"
-            )
-        if len(forms) > 1:
-            # 🔴 判定是 if weekday … elif monthday … elif workdays … else days，
-            #    同时配两种会让后面那种被**静默忽略**。而业务改节律时最可能的
-            #    动作恰恰是「加一行新的、忘了删旧的」—— 后果是节律看着改了、
-            #    实际没改，且没有任何地方会说出来。这里直接拦死。
-            a.fatal.append(
-                f"节点「{node.get('name')}」的 repeat 同时配了 {'、'.join(forms)}，"
-                f"只能配一种。多配的那种会被静默忽略，所以不许这么写。"
-            )
-        raw_weekday = rep.get("weekday")
-        if raw_weekday:
-            bad = [m for m in _members(raw_weekday, str)
-                   if not (isinstance(m, str) and m in _WEEKDAY_INDEX)]
-            if bad or not _members(raw_weekday, str):
-                a.fatal.append(
-                    f"节点「{node.get('name')}」的 repeat.weekday 里 {bad!r} "
-                    f"不合法，只能是 Mon/Tue/Wed/Thu/Fri/Sat/Sun 或其全称"
-                    f"（单个字符串或字符串数组都行）"
-                )
-        raw_monthday = rep.get("monthday")
-        if raw_monthday:
-            bad = [m for m in _members(raw_monthday, int)
-                   if isinstance(m, bool) or not isinstance(m, int)
-                   or not (1 <= m <= 31)]
-            if bad or not _members(raw_monthday, int):
-                a.fatal.append(
-                    f"节点「{node.get('name')}」的 repeat.monthday 里 {bad!r} "
-                    f"不合法，只能是 1~31 的整数（单个整数或整数数组都行）。"
-                    f"配 31 时，当月不足 31 天则按当月最后一天算。"
-                )
+        # 与 validate_configs 共用同一份检查，见 repeat_errors 的注释
+        a.fatal.extend(repeat_errors(node.get("repeat"),
+                                     f"节点「{node.get('name')}」"))
         thr = node.get("threshold") or {}
         # 存在性用 in 判断，不用真值判断——threshold.days=0 是合法值
         # （"进入即算超期"，靠 repeat.weekday 管节奏），不能被当成"没填"。
@@ -1675,6 +1646,57 @@ def monthday_hits(day: date, wanted: list[int]) -> bool:
         return False
     last = calendar.monthrange(day.year, day.month)[1]
     return any(min(w, last) == day.day for w in wanted)
+
+
+def repeat_errors(rep: dict, where: str) -> list[str]:
+    """
+    复提醒节律的合法性检查。**离线校验（validate_configs）与运行时校验
+    （assert_sheet）共用这一份**。
+
+    🔴 分开各写一遍的话，迟早只有一边挡得住。rc6 的 alert.timeout_seconds
+       就是只有运行时挡、离线还报「通过」；而 2026-08-10 把 weekday 改成
+       数组时，`doctor --validate-config` 照样报「全部通过」，直到真读台账
+       才炸 TypeError —— 离线校验没覆盖到 repeat，这个函数就是来补这个的。
+    """
+    errs: list[str] = []
+    rep = rep or {}
+    forms = [k for k in repeat_forms if rep.get(k)]
+    if not forms:
+        errs.append(
+            f"{where}缺少 repeat（复提醒间隔）。不允许默认成「只催一次」，"
+            f"请在 rules.json 里补上。可用写法：days / workdays / weekday / monthday。"
+        )
+    if len(forms) > 1:
+        # 判定是 if weekday … elif monthday … elif workdays … else days，
+        # 同时配两种会让后面那种被**静默忽略**。而业务改节律时最可能的动作
+        # 恰恰是「加一行新的、忘了删旧的」—— 后果是节律看着改了、实际没改，
+        # 且没有任何地方会说出来。这里直接拦死。
+        errs.append(
+            f"{where}的 repeat 同时配了 {'、'.join(forms)}，只能配一种。"
+            f"多配的那种会被静默忽略，所以不许这么写。"
+        )
+    raw_weekday = rep.get("weekday")
+    if raw_weekday:
+        members = _members(raw_weekday, str)
+        bad = [m for m in members if not (isinstance(m, str) and m in _WEEKDAY_INDEX)]
+        if bad or not members:
+            errs.append(
+                f"{where}的 repeat.weekday 里 {bad!r} 不合法，"
+                f"只能是 Mon/Tue/Wed/Thu/Fri/Sat/Sun 或其全称"
+                f"（单个字符串或字符串数组都行）"
+            )
+    raw_monthday = rep.get("monthday")
+    if raw_monthday:
+        members = _members(raw_monthday, int)
+        bad = [m for m in members
+               if isinstance(m, bool) or not isinstance(m, int) or not (1 <= m <= 31)]
+        if bad or not members:
+            errs.append(
+                f"{where}的 repeat.monthday 里 {bad!r} 不合法，"
+                f"只能是 1~31 的整数（单个整数或整数数组都行）。"
+                f"配 31 时，当月不足 31 天则按当月最后一天算。"
+            )
+    return errs
 
 
 def cadence_text(rep: dict) -> str:

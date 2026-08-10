@@ -129,12 +129,18 @@ class StartupFaultTest(unittest.TestCase):
         """
         缺复提醒间隔不许默认成「只催一次」——
         新设计的退出机制只有「推进」和「终止」，不该有自动静默这第三种。
+
+        退出码 2 而不是 1：0.4.0-rc8 起 repeat 的检查同时进了离线校验
+        （validate_configs），于是在**碰台账之前**就拦下了。按 README 的
+        退出码表，「配置错」本就归 2、「入口断言不过」才归 1，这一步是往
+        契约上靠。两者对宿主都是「报失败」，且告警照发（下面钉住）。
         """
         rules = rules_cfg(collect={"repeat": {}})
         with temp_home(rules=rules):
             r = run_main([f"--today={TODAY}", "--force-push"], sheet())
-            self.assertEqual(r.code, 1)
+            self.assertEqual(r.code, 2)
             self.assertIn("复提醒间隔", r.err)
+            self.assertTrue(r.alerts, "配置错也必须告警，不能只写日志")
 
     def test_config_referencing_nonexistent_column_is_fatal(self):
         """

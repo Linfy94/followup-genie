@@ -170,6 +170,49 @@ class ExclusivityTest(unittest.TestCase):
                                 f"monthday={bad!r} 必须报错")
 
 
+class OfflineValidationTest(unittest.TestCase):
+    """
+    🔴 `doctor --validate-config` 也必须拦得住。
+
+    2026-08-10 实测：把 weekday 改成数组后，离线校验对着一个会炸的配置
+    照样报「全部通过」，真读台账时才 TypeError —— 因为 repeat 校验只住在
+    assert_sheet 里，而那要有 sheet 才跑。这与 rc6 的 alert.timeout_seconds
+    是同一个形状：**离线一道、运行时一道，两道都要有。**
+    """
+
+    def _offline(self, repeat: dict) -> list[str]:
+        rules = {"rulesets": {"box": {"nodes": [
+            {"id": "x", "name": "①测试", "enabled": True,
+             "threshold": {"days": 7}, "repeat": repeat}]}}, "workday": {}}
+        return [e for e in core.validate_configs({"ledgers": []}, rules, {})
+                if "repeat" in e]
+
+    def test_catches_mixed_forms(self):
+        self.assertTrue(any("只能配一种" in e
+                            for e in self._offline({"weekday": "Mon", "days": 7})))
+
+    def test_catches_illegal_weekday(self):
+        self.assertTrue(any("Funday" in e
+                            for e in self._offline({"weekday": ["Mon", "Funday"]})))
+
+    def test_catches_illegal_monthday(self):
+        self.assertTrue(self._offline({"monthday": [0]}))
+
+    def test_good_config_passes(self):
+        for good in ({"days": 7}, {"workdays": 2},
+                     {"weekday": ["Mon", "Thu"]}, {"monthday": [1, 15]}):
+            with self.subTest(good=good):
+                self.assertEqual(self._offline(good), [])
+
+    def test_disabled_node_is_not_nagged(self):
+        """未启用的节点允许字段不全 —— 停用的节点不该因为缺 repeat 而挡住启动。"""
+        rules = {"rulesets": {"box": {"nodes": [
+            {"id": "x", "name": "①停用的", "enabled": False}]}}, "workday": {}}
+        self.assertEqual(
+            [e for e in core.validate_configs({"ledgers": []}, rules, {})
+             if "repeat" in e], [])
+
+
 class CadenceTextTest(unittest.TestCase):
     """
     节律文案：业务改了规则，推送里要能看出来改成了什么。
