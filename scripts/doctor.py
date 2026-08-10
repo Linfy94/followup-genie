@@ -231,8 +231,8 @@ def check_lark_credential(doc: Doc, ledger: dict) -> bool:
         lark_base.check_credential(ledger["base_token"], profile)
     except LedgerError as e:
         doc.add(BAD, f"飞书身份（profile={profile}）不可用", f"{e}\n"
-                "🔴 注意：这会表现成「今天没有超时单」，不是正常状态。"
-                "多半是 lark-cli 的这个 profile 需要重新 auth login。")
+                "🔴 注意：这会表现成「今天没有超时单」，不是正常状态。\n"
+                "请按上面的错误分类处理；不要在重新登录和添加协作者之间反复尝试。")
         return False
     doc.add(OK, f"飞书身份（profile={profile}）可用", "（内容不打印）")
     return True

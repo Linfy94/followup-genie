@@ -59,6 +59,93 @@ def _child_env(exe: str) -> dict:
     return cli_env.child_env(exe, _LARK_ENV)
 
 
+def _arg_value(args: list[str], flag: str, default: str = "") -> str:
+    """从 argv 里取一个标志的值；只用于生成报错指引。"""
+    try:
+        return args[args.index(flag) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
+def _cli_error(payload: dict, args: list[str]) -> str:
+    """
+    把 lark-cli 的结构化错误变成一条**唯一且可执行**的处理建议。
+
+    飞书读取同时依赖四层：命名 profile、用户 OAuth、应用 scope、文档协作者。
+    以前这里只保留 message，doctor 再统一猜成「重新 auth login」，结果资源权限
+    不足时让人反复登录，登录失效时又让作者反复加协作者。结构化字段必须留住。
+    """
+    err = payload.get("error") or {}
+    profile = _arg_value(args, "--profile", "sentinel")
+    identity = payload.get("identity") or "user"
+    err_type = str(err.get("type") or "")
+    subtype = str(err.get("subtype") or "")
+    code = err.get("code")
+    message = str(err.get("message") or "未知错误")
+    hint = str(err.get("hint") or "").strip()
+    missing = err.get("missing_scopes") or []
+    if not isinstance(missing, list):
+        missing = [missing]
+
+    facts = [f"identity={identity}", f"profile={profile}"]
+    if err_type:
+        facts.append(f"type={err_type}")
+    if subtype:
+        facts.append(f"subtype={subtype}")
+    if code is not None:
+        facts.append(f"code={code}")
+
+    lower = " ".join((err_type, subtype, message)).lower()
+    if missing or subtype == "missing_scope":
+        scopes = "、".join(str(x) for x in missing if x) or "（飞书未返回具体 scope）"
+        action = (
+            f"处理建议：这是 API 权限范围问题，不是文档协作者问题。"
+            f"请给 profile={profile} 补最小的多维表格只读授权；缺少：{scopes}。"
+            f"不要让文档作者重复添加协作者。"
+        )
+        if hint:
+            action += f" lark-cli 建议：{hint}"
+    elif "keychain" in lower:
+        action = (
+            f"处理建议：这是 profile={profile} 的本机凭证存储不可用，不是重新扫码"
+            f"或文档协作者问题。先在普通终端运行 `lark-cli config show --profile "
+            f"{profile}`；若定时任务读不到 macOS 钥匙串，再评估 "
+            f"`lark-cli config keychain-downgrade --profile {profile}` 的安全取舍。"
+        )
+    elif any(word in lower for word in (
+            "not logged", "login required", "token expired", "invalid token",
+            "unauthorized", "authentication")):
+        action = (
+            f"处理建议：这是用户登录态问题。请先运行 `lark-cli auth status "
+            f"--profile {profile} --json --verify`；确认失败后，只对同一个 profile "
+            f"执行 `lark-cli auth login --profile {profile} "
+            f"--scope \"bitable:app:readonly offline_access\"`。"
+        )
+    elif str(code) == "91403" or subtype in {"resource_permission", "forbidden"}:
+        action = (
+            f"处理建议：当前 user 身份已经调用到飞书，但没有这份 Base 的资源权限。"
+            f"请让文档作者把 `auth status --profile {profile}` 显示的实际登录账号"
+            f"加入文档协作者。程序固定使用 `--as user`，不要把机器人当成协作者。"
+        )
+    elif "profile" in lower and any(word in lower for word in (
+            "not found", "missing", "initialize", "not initialized")):
+        action = (
+            f"处理建议：这台电脑没有可用的 profile={profile} 应用配置。"
+            f"重新登录不会创建 profile；请先按 `docs/飞书多维表格接入.md` 完成"
+            f"应用配置，再对同一个 profile 登录。"
+        )
+    else:
+        action = (
+            f"处理建议：先检查 `lark-cli auth status --profile {profile} --json "
+            f"--verify`，再用真实 base_token 做只读 `+table-list` 探针。"
+            f"不要在“重新登录”和“添加协作者”之间盲目来回尝试。"
+        )
+        if hint:
+            action += f" lark-cli 建议：{hint}"
+
+    return f"{message}\n错误分类：{'，'.join(facts)}\n{action}"
+
+
 def _run_cli(subcommand: str, args: list[str]) -> dict:
     """调只读白名单内的一个 lark-cli base 子命令，返回解析后的 JSON 信封。"""
     if subcommand not in ALLOWED_SUBCOMMANDS:
@@ -66,6 +153,7 @@ def _run_cli(subcommand: str, args: list[str]) -> dict:
             f"lark_base 只允许调用只读子命令 {sorted(ALLOWED_SUBCOMMANDS)}，"
             f"收到 {subcommand!r}（拒绝调用，这不是可以放宽的检查）"
         )
+    profile = _arg_value(args, "--profile", "sentinel")
     exe = lark_cli_bin()
     if exe is None:
         # 🔴 **绝不自动安装。** 装一个命令行工具会改动这台电脑的全局环境，
@@ -79,7 +167,9 @@ def _run_cli(subcommand: str, args: list[str]) -> dict:
             "\n"
             "怎么装（需要先有 Node.js）：\n"
             "    npm install -g @larksuiteoapi/lark-cli\n"
-            "装完在终端里执行一次 `lark-cli auth login` 完成授权。\n"
+            f"装完请按 docs/飞书多维表格接入.md 配置同一个 profile={profile}。\n"
+            "只执行不带 profile 的 `lark-cli auth login` 可能登录到另一套配置，"
+            "程序仍然读不到。\n"
             "\n"
             "已经找过这些位置，都没有：PATH、~/.local/bin、~/.hermes/bin、"
             "/opt/homebrew/bin、/usr/local/bin。\n"
@@ -109,9 +199,8 @@ def _run_cli(subcommand: str, args: list[str]) -> dict:
         raise LedgerError(f"lark-cli 返回不是合法 JSON（{subcommand}）：{raw[:300]}") from e
 
     if not payload.get("ok"):
-        err = payload.get("error") or {}
         raise LedgerError(
-            f"lark-cli 调用失败（{subcommand}）：{err.get('message') or payload}"
+            f"lark-cli 调用失败（{subcommand}）：{_cli_error(payload, args)}"
         )
     return payload
 

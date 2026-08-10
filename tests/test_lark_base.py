@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import date
 from unittest import mock
@@ -168,6 +169,61 @@ class BadResponseTest(unittest.TestCase):
             self.run_cli(stdout='{"ok": false, "error": {"message": "no authority"}}')
         self.assertIn("no authority", str(cm.exception),
                       "要把服务端原话带出来，否则无从排查")
+
+    def structured_error(self, error, *, identity="user") -> str:
+        payload = {"ok": False, "identity": identity, "error": error}
+        with self.assertRaises(LedgerError) as cm:
+            self.run_cli(stdout=json.dumps(payload, ensure_ascii=False))
+        return str(cm.exception)
+
+    def test_missing_scope_does_not_tell_author_to_add_collaborator(self):
+        out = self.structured_error({
+            "type": "authorization", "subtype": "missing_scope",
+            "message": "missing scope", "missing_scopes": ["bitable:app:readonly"],
+            "hint": "login with the missing scope",
+        })
+        self.assertIn("API 权限范围问题", out)
+        self.assertIn("bitable:app:readonly", out)
+        self.assertIn("不要让文档作者重复添加协作者", out)
+
+    def test_login_error_names_the_same_profile(self):
+        out = self.structured_error({
+            "type": "authentication", "subtype": "not_logged_in",
+            "message": "login required",
+        })
+        self.assertIn("用户登录态问题", out)
+        self.assertIn("auth status --profile sentinel", out)
+        self.assertIn(
+            'auth login --profile sentinel --scope "bitable:app:readonly offline_access"',
+            out)
+
+    def test_resource_permission_names_user_collaborator_not_bot(self):
+        out = self.structured_error({
+            "type": "api", "subtype": "forbidden", "code": 91403,
+            "message": "forbidden",
+        })
+        self.assertIn("没有这份 Base 的资源权限", out)
+        self.assertIn("实际登录账号", out)
+        self.assertIn("不要把机器人当成协作者", out)
+
+    def test_keychain_error_is_not_mislabeled_as_login(self):
+        out = self.structured_error({
+            "type": "api", "subtype": "unknown",
+            "message": "keychain Get failed: keychain not initialized",
+        })
+        self.assertIn("本机凭证存储不可用", out)
+        self.assertIn("config show --profile sentinel", out)
+        self.assertIn("不是重新扫码", out)
+
+    def test_unknown_error_preserves_classification_and_stops_guessing(self):
+        out = self.structured_error({
+            "type": "api", "subtype": "unknown", "code": 999,
+            "message": "unexpected upstream failure",
+        })
+        self.assertIn("unexpected upstream failure", out)
+        self.assertIn("type=api", out)
+        self.assertIn("subtype=unknown", out)
+        self.assertIn("不要在“重新登录”和“添加协作者”之间盲目来回尝试", out)
 
     def test_timeout(self):
         import subprocess as sp

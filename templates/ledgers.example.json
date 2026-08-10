@@ -15,7 +15,7 @@
         "支持两种数据源，写错会直接报错、不会静默跑空：",
         "  tencent_mcp —— 腾讯文档。需要 file_id + sheet_id，凭证是 .env 的 TENCENT_DOCS_TOKEN。什么都不用装。",
         "  lark_cli    —— 飞书多维表格。需要 base_token + table_id + profile，",
-        "                 靠外部的 lark-cli 命令行工具读（要先装 Node.js 和 lark-cli 并 auth login）。",
+        "                 靠外部的 lark-cli 命令行工具读（安装与四层授权见 docs/飞书多维表格接入.md）。",
         "                 完整字段见本文件末尾那个「示例飞书台账」。",
         "两种可以混用，一份配置里既有腾讯文档台账也有飞书台账是正常的；",
         "只用其中一种时，另一种的凭证不需要配，自检也不会要求你配。"
@@ -118,13 +118,14 @@
       "_前置条件": [
         "需要 Node.js 和飞书官方的 lark-cli：",
         "    npm install -g @larksuiteoapi/lark-cli",
-        "    lark-cli auth login",
+        "安装后按 docs/飞书多维表格接入.md 配置命名 profile、Base scope、用户登录与文档协作者。",
+        "每条 config/auth/base 命令必须显式使用与本条 profile 字段相同的名字。",
         "程序不会替你装，找不到时会停下来把命令打出来。",
         "只读白名单写死在 scripts/lark_base.py 的 ALLOWED_SUBCOMMANDS：",
         "只允许 +table-list / +field-list / +record-list 三个只读子命令。"
       ],
 
-      "base_token": "多维表格的 base token。从分享链接里取，或用 lark-cli 解析出来",
+      "base_token": "多维表格的 base token。必须来自原始 /base/ 链接或 lark-cli 解析结果；/share/base/view/shr... 不能直接使用",
       "table_id": "数据表 id，形如 tblXXXXXXXXXXXX。一个 base 里每张表一个",
       "profile": "sentinel",
       "_profile说明": "lark-cli 的身份配置名，决定用谁的授权去读。缺了会报错，不会默默用错身份。",

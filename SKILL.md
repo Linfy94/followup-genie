@@ -5,9 +5,9 @@ description: 项目跟进精灵 —— 流程节点催办。按业务台账判�
 
 # 项目跟进精灵 🧚
 
-版本：`0.4.0-rc11`。这是预发布版；Hermes + macOS 已实测（腾讯文档与飞书多维表格两条线都在跑），WorkBuddy 的工作空间安装已完成隔离测试，仍需业务电脑实测。要求 Python 3.9+，零第三方 Python 依赖。
+版本：`0.4.0-rc12`。这是预发布版；Hermes + macOS 已实测（腾讯文档与飞书多维表格两条线都在跑），WorkBuddy 的工作空间安装已完成隔离测试，仍需业务电脑实测。要求 Python 3.9+，零第三方 Python 依赖。
 
-**依赖按数据源算**：接腾讯文档只需 `TENCENT_DOCS_TOKEN`，什么都不用装；接飞书多维表格需要 Node.js + `lark-cli` 并完成 `lark-cli auth login`，但**不需要腾讯文档凭证**。程序绝不自动安装 lark-cli，找不到时会停下来说清怎么装。Windows 尚未验证。
+**依赖按数据源算**：接腾讯文档只需 `TENCENT_DOCS_TOKEN`，什么都不用装；接飞书多维表格需要 Node.js + `lark-cli`，并按 `docs/飞书多维表格接入.md` 依次完成命名 profile、Base 只读 scope、同一 profile 的用户登录和文档协作者授权。不得只让业务反复执行无 profile 的 `auth login`，也不得把机器人当成当前 user 模式的协作者。程序绝不自动安装 lark-cli。Windows 尚未验证。
 
 给业务本人的**私人待办提醒器**：读业务维护的项目台账，找出在某个流程节点上卡太久的项目，提醒她去催。
 

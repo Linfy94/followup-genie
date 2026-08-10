@@ -1,6 +1,6 @@
 # 已知问题
 
-本文件对应 `0.4.0-rc11`。这些问题不阻止小范围安装测试，但不应被描述为"已正式上线"。
+本文件对应 `0.4.0-rc12`。这些问题不阻止小范围安装测试，但不应被描述为"已正式上线"。
 
 ## 业务测试前必须知道
 
@@ -61,6 +61,18 @@
    所以无法像腾讯文档那样跑完比对一次 `last_modify_time`。
    与飞书同样，只能靠 `wecom_doc.ALLOWED_SUBCOMMANDS` 这道命令白名单兜底
    —— 白名单里只有 `sheet_get_info` 和 `get_doc_content` 两个只读命令。
+
+## 已在 `0.4.0-rc12` 修复
+
+**飞书从零接入不再在「重新登录」和「添加协作者」之间来回跳。**
+
+- 新增 `docs/飞书多维表格接入.md`，按应用 profile、API scope、同一 profile 的
+  user 登录、文档协作者四道门顺序验收。
+- 所有示例显式携带 `--profile`；无 profile 的 `auth login` 不再作为安装指令。
+- 明确 `/share/base/view/shr...` 不是 `base_token`，必须取得原始 Base 链接或真实 ID。
+- lark-cli 的 `type/subtype/code/missing_scopes/hint` 不再被丢弃。自检分别识别
+  profile、登录、scope、资源权限和 macOS 钥匙串问题，只给当前层的一条建议。
+- 当前代码固定 `--as user`，作者应添加实际登录账号为协作者，不应添加机器人。
 
 ## 已在 `0.4.0-rc10` 修复 / 新增
 

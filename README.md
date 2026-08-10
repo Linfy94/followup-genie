@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `0.4.0-rc11` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
+> `0.4.0-rc12` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
 
 ## 给业务：只复制下面这一段
 
@@ -64,16 +64,22 @@
 | 你的台账在 | 需要装 | 需要的凭证 |
 |---|---|---|
 | 腾讯文档 | **什么都不用装** | `.env` 里的 `TENCENT_DOCS_TOKEN`（扫码获取） |
-| 飞书多维表格 | **Node.js** + **lark-cli** | lark-cli 自己的授权（`lark-cli auth login`），**不需要腾讯文档凭证** |
+| 飞书多维表格 | **Node.js** + **lark-cli** | 命名 profile + Base 只读授权 + 同一用户的文档协作者权限，**不需要腾讯文档凭证** |
 
 ```bash
-# 只有接飞书才需要这两步
+# 只有接飞书才需要安装；授权不能只跑一句无 profile 的 auth login
 npm install -g @larksuiteoapi/lark-cli
-lark-cli auth login
 ```
 
-🔴 **程序绝不会替你自动安装 lark-cli。** 找不到它时会停下来、把上面这两条命令
-和已经找过哪些目录一起打出来，然后退出——装什么到这台电脑上该由人决定。
+安装后完整执行 [`docs/飞书多维表格接入.md`](docs/飞书多维表格接入.md)。
+飞书读取有四道门：应用 profile、API scope、同一 profile 的用户登录、目标文档协作者。
+“重新登录”和“让作者加协作者”不是二选一；自检会按失败层级给唯一处理建议。
+
+🔴 `/share/base/view/shr...` 是分享视图链接，不是 `base_token`。浏览器能打开不等于
+API 能读取；应向作者索取原始 `/base/...` 链接或真实 `base_token` + `table_id`。
+
+🔴 **程序绝不会替你自动安装 lark-cli。** 找不到它时会停下来、把安装命令、
+接入文档路径和已经找过哪些目录一起打出来，然后退出——装什么到这台电脑上该由人决定。
 
 🔴 **纯飞书用户不需要腾讯文档凭证。** `doctor` 会先看你启用了哪些台账，
 没有腾讯文档台账就不查那个凭证，也不会报红。
@@ -286,7 +292,7 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test       
 ⚠️ `holidays.json` 是全项目唯一需要人工年度维护的东西（国务院调休无法用规则推算）。
 过期时 `doctor` 会报警，**不会静默降级**。
 
-✅ **0.4.0-rc11 首次安装已自带核对过的 2026 年预设**：33 个放假日、6 个补班日，
+✅ **0.4.0-rc12 首次安装已自带核对过的 2026 年预设**：33 个放假日、6 个补班日，
 `covers_year: 2026`、`verified: true`。升级时如已有 `holidays.json`，`setup.sh`
 会跳过并逐字节保留，绝不覆盖业务自己维护的日期。
 
@@ -348,7 +354,7 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 
 ## 已知边界
 
-见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.4.0-rc11` 的主要限制：
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.4.0-rc12` 的主要限制：
 WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**。
 
 ---
