@@ -1193,13 +1193,14 @@ def check_manual_lists(sheet: qqdoc.Sheet, ledger: dict) -> Assertions:
       没有 name                 → 警告，提示补齐（无法校验身份）
     """
     a = Assertions()
-    key_field = ledger.get("key_field", "序号")
+    kfields = key_fields(ledger)
+    key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
 
     # 台账当前的 序号 → 企业名
     live: dict[str, str] = {}
     for r in sheet.data_rows:
-        k = sheet.text(r, key_field)
+        k = row_key(sheet, r, kfields)
         n = sheet.text(r, name_field)
         if k and n:
             live[k] = n
@@ -1245,7 +1246,8 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     这些护栏对应方案「对抗式审查发现」里实测复现过的静默失败点。
     """
     a = Assertions()
-    key_field = ledger.get("key_field", "序号")
+    kfields = key_fields(ledger)
+    key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
 
     # ── P0-1 的护栏：表头断言 ──
@@ -1264,7 +1266,9 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         )
 
     # 配置里引用到的所有字段都必须真实存在（否则判据会静默失效）
-    referenced: set[str] = set()
+    # 主键字段也算 —— 组合键里少写一列的话 row_key 会整个返回空，
+    # 表现是「主键读到空值」而不是「配置写错了」，多绕一层。
+    referenced: set[str] = set(kfields)
     for node in ruleset.get("nodes", []):
         if node.get("enabled"):
             referenced |= referenced_fields(node.get("when") or [])
@@ -1304,7 +1308,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     # 「序号」是 NUMBER 型，用 string_value 读会得到 101 个空串，
     # 灰色名单/例外表/state 的键全部失效，而输出总数看起来正常。
     rows = [r for r in sheet.data_rows if sheet.text(r, name_field)]
-    keys = [sheet.text(r, key_field) for r in rows]
+    keys = [row_key(sheet, r, kfields) for r in rows]
     blank = sum(1 for k in keys if not k)
     if blank:
         a.fatal.append(
@@ -1337,7 +1341,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
             if sheet.date(r, f) is not None:
                 continue
             (blank if not sheet.text(r, f) else unparsable).append(
-                sheet.text(r, key_field))
+                row_key(sheet, r, kfields))
         if blank:
             a.warnings.append(
                 f"{f} 有 {len(blank)} 行为空（{', '.join(blank[:8])}"
@@ -1353,7 +1357,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
             )
         today = date.today()
         future = [
-            sheet.text(r, key_field) for r in rows
+            row_key(sheet, r, kfields) for r in rows
             if (d := sheet.date(r, f)) and d > today
         ]
         if future:
@@ -1590,6 +1594,45 @@ def judge_terminal(get_text, ledger: dict, key: str) -> str | None:
 
     # 优先级 3：灰色底纹——已降级为仅作提示，不再作判据
     return None
+
+
+def key_fields(ledger: dict) -> list[str]:
+    """
+    主键字段，允许写成一个字段名或**多个字段名的数组**（组合键）。
+
+    🔴 为什么需要组合键：三份企微台账**一个唯一列都没有**（2026-08-10 实测）。
+       舆情的「编号」有 3 组重复，AI体检的「序号」2 组，GEO 的「序号」1 组
+       外加 4 行空值；而「企业」这类名字列重复得更多（同一家公司在不同分行
+       各开一个项目很正常）。
+       重复主键会让两个项目共用一条催办状态、互相静音，所以入口断言判它致命 ——
+       也就是说不支持组合键这三份台账一行都读不了。
+       实测「编号/序号 + 企业」在三张表上**全部唯一，0 重复**。
+
+    放宽方式与 clock.fallback、repeat.weekday 完全一致（标量或数组都收），
+    不另起一套。
+    """
+    raw = ledger.get("key_field", "序号")
+    if isinstance(raw, str):
+        return [raw] if raw.strip() else []
+    if isinstance(raw, list):
+        return [f for f in raw if isinstance(f, str) and f.strip()]
+    return []
+
+
+def row_key(sheet, row: int, fields: list[str]) -> str:
+    """
+    一行的主键值。组合键用 `|` 连接。
+
+    🔴 任一段为空就整个返回空 —— 让入口断言的「主键读到空值」抓住它，
+       而不是拼出一个 "|甲公司" 这样两行可能撞上的半截键。
+    """
+    parts = [sheet.text(row, f) for f in fields]
+    return "|".join(parts) if all(parts) else ""
+
+
+def key_label(fields: list[str]) -> str:
+    """报错文案里怎么称呼这个主键。"""
+    return "+".join(fields) if len(fields) > 1 else (fields[0] if fields else "序号")
 
 
 def clock_fallback_fields(clock: dict) -> list[str]:
@@ -2048,7 +2091,8 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
                 + (f" —— {node.get('_禁用原因')}" if node.get("_禁用原因") else "")
             )
 
-    key_field = ledger.get("key_field", "序号")
+    kfields = key_fields(ledger)
+    key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
     paused_map = {str(p.get("key")): p.get("reason", "") for p in (ledger.get("paused") or [])}
     # 计时起点的人工播种，给那些一个可靠日期列都没有的台账用（见 stage_seed_map）
@@ -2063,7 +2107,7 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
     for r in rows:
         get_text = lambda f, _r=r: sheet.text(_r, f)  # noqa: E731
         get_date = lambda f, _r=r: sheet.date(_r, f)  # noqa: E731
-        key = sheet.text(r, key_field)
+        key = row_key(sheet, r, kfields)
         name = sheet.text(r, name_field)
 
         # 1) 责任范围：范围外的行压根不进催办流程
