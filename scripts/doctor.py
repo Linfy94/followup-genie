@@ -21,6 +21,7 @@ from datetime import date, datetime
 import core
 import qqdoc
 import lark_base
+import wecom_doc
 from core import LedgerError
 
 OK, WARN, BAD = "✅", "⚠️ ", "🔴"
@@ -237,6 +238,26 @@ def check_lark_credential(doc: Doc, ledger: dict) -> bool:
     return True
 
 
+def check_wecom_doc_credential(doc: Doc, ledger: dict) -> bool:
+    """
+    企微文档能不能读。只影响 source=wecom_doc 的台账，同一份文档探一次。
+
+    🔴 这里报红的最常见原因是**机器人的「获取成员文档内容」能力授权掉了**
+       （errcode 851008）。那种情况下取数会返回 0 行 —— 也就是表现成
+       「今天没有超时单」，所以必须在自检里单独点名。
+    """
+    try:
+        wecom_doc.check_credential(ledger["url"])
+    except LedgerError as e:
+        doc.add(BAD, "企业微信文档读取权限不可用", f"{e}\n"
+                "🔴 注意：这会表现成「今天没有超时单」，不是正常状态。\n"
+                "若 errcode 是 851008，去企微「工作台 → 智能机器人」"
+                "给机器人开通「获取成员文档内容」能力（一次开通对全部文档生效）。")
+        return False
+    doc.add(OK, "企业微信文档可读", "（内容不打印）")
+    return True
+
+
 def check_ledger(doc: Doc, ledger: dict, rules_cfg: dict) -> None:
     name = ledger.get("name")
     source = ledger.get("source", "tencent_mcp")
@@ -287,11 +308,23 @@ def check_ledger(doc: Doc, ledger: dict, rules_cfg: dict) -> None:
                     "缺它的话，业务遇到「想让某条别催了」时没有正确的表达方式。\n"
                     + (f"台账 owner：{fp_before.get('last_modify_name')}" if fp_before else ""))
 
-    # 只读性验证：读了一整轮，确认没动过。lark_cli 暂无等价指纹，只能报出来。
+    # 只读性验证：读了一整轮，确认没动过。另外两个数据源都拿不到等价指纹，
+    # 只能把这件事明说出来 —— 「没验」和「验过了」必须分得开。
     if source != "tencent_mcp":
+        gate = {
+            "lark_cli": "lark_base.ALLOWED_SUBCOMMANDS"
+                        "（+table-list / +field-list / +record-list）",
+            "wecom_doc": "wecom_doc.ALLOWED_SUBCOMMANDS"
+                         "（sheet_get_info / get_doc_content）",
+        }.get(source, "该数据源的只读命令白名单")
+        extra = ""
+        if source == "wecom_doc":
+            # 2026-08-10 实测：sheet_get_info 顶层只有 errcode/errmsg/name/sheets/url
+            extra = ("\n实测 sheet_get_info 的返回里没有修改时间，"
+                     "所以这条验证在企微上做不了，不是漏做。")
         doc.add(WARN, f"台账「{name}」只读性验证未实现",
                 f"数据源 {source} 暂无「最后修改人/时间」等价指纹可核对，"
-                f"只依赖 lark_base.py 的只读命令白名单（table-list/field-list/record-list）")
+                f"只依赖 {gate} 这道白名单兜底。{extra}")
         return
     try:
         fp_after = qqdoc.file_fingerprint(ledger["file_id"])
@@ -524,7 +557,8 @@ def main() -> int:
         tencent_ok = check_credential(doc) if needs_tencent else True
         if not needs_tencent:
             doc.add(OK, "腾讯文档凭证：本机没有腾讯文档台账，无需配置")
-        lark_ok: dict[str, bool] = {}  # profile -> 是否可用，避免同一 profile 重复查
+        lark_ok: dict[str, bool] = {}   # profile -> 是否可用，避免同一 profile 重复查
+        wecom_ok: dict[str, bool] = {}  # url -> 是否可读，同一份文档只探一次
         for ledger in ledgers_cfg.get("ledgers", []):
             if not ledger.get("enabled"):
                 continue
@@ -537,6 +571,12 @@ def main() -> int:
                 if profile not in lark_ok:
                     lark_ok[profile] = check_lark_credential(doc, ledger)
                 if not lark_ok[profile]:
+                    continue
+            elif source == "wecom_doc":
+                url = ledger.get("url", "")
+                if url not in wecom_ok:
+                    wecom_ok[url] = check_wecom_doc_credential(doc, ledger)
+                if not wecom_ok[url]:
                     continue
             check_ledger(doc, ledger, rules_cfg)
         check_reminders(doc, output_cfg)

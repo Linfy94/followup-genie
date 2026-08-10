@@ -1307,19 +1307,46 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     # ── P0-2 的护栏：主键断言 ──
     # 「序号」是 NUMBER 型，用 string_value 读会得到 101 个空串，
     # 灰色名单/例外表/state 的键全部失效，而输出总数看起来正常。
+    #
+    # 🔴 只对**责任范围内**的行判致命。判定里只有范围内的行会产生催办状态
+    #    （范围外的直接计入「范围外」跳过），所以范围外的空主键/重复主键
+    #    伤不到任何东西，为它停掉整条业务线不成比例。
+    #    2026-08-10 实测：GEO 表有 4 行把「提问关键词」填进了企业列
+    #    （无序号、无分行），范围内 0 行，却让整份台账读不了。
+    #
+    # 🔴 但这一步**不能变成静默放行**：范围外的问题降级成数据质量警告，
+    #    照样每天显示。而真正的系统性读失败（整列读成空串）必然同时命中
+    #    范围内的行 —— 那时仍然是致命，护栏的力度一点没减。
     rows = [r for r in sheet.data_rows if sheet.text(r, name_field)]
-    keys = [row_key(sheet, r, kfields) for r in rows]
-    blank = sum(1 for k in keys if not k)
+    scoped = [r for r in rows
+              if all(match_condition(lambda f, _r=r: sheet.text(_r, f), c)
+                     for c in (ledger.get("scope_filters") or []))]
+
+    def _key_problems(subset: list[int]) -> tuple[int, list[str]]:
+        ks = [row_key(sheet, r, kfields) for r in subset]
+        return (sum(1 for k in ks if not k),
+                sorted({k for k in ks if k and ks.count(k) > 1}))
+
+    blank, dupes = _key_problems(scoped)
     if blank:
         a.fatal.append(
-            f"{key_field} 列有 {blank} 行读到空值（共 {len(rows)} 行有项目名）。"
+            f"{key_field} 列有 {blank} 行读到空值（责任范围内共 {len(scoped)} 行有项目名）。"
             f"这会让终止例外表、暂缓名单、催办状态全部失效。"
         )
-    dupes = sorted({k for k in keys if k and keys.count(k) > 1})
     if dupes:
         a.fatal.append(
             f"{key_field} 出现重复值：{', '.join(dupes)}。"
             f"重复主键会让两个项目共用一条催办状态，必须先在台账里改掉。"
+        )
+    out_blank, out_dupes = _key_problems([r for r in rows if r not in set(scoped)])
+    if out_blank or out_dupes:
+        a.warnings.append(
+            f"{key_field} 在责任范围外还有 "
+            + "、".join(filter(None, [
+                f"{out_blank} 行空值" if out_blank else "",
+                f"{len(out_dupes)} 组重复值" if out_dupes else ""]))
+            + "。这些行本来就不催，所以不阻断运行；但若它们哪天进了责任范围，"
+              "会立刻变成致命错误。"
         )
 
     # ── P0-3 的护栏：日期断言 ──

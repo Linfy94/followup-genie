@@ -5,7 +5,7 @@ description: 项目跟进精灵 —— 流程节点催办。按业务台账判�
 
 # 项目跟进精灵 🧚
 
-版本：`0.4.0-rc9`。这是预发布版；Hermes + macOS 已实测（腾讯文档与飞书多维表格两条线都在跑），WorkBuddy 的工作空间安装已完成隔离测试，仍需业务电脑实测。要求 Python 3.9+，零第三方 Python 依赖。
+版本：`0.4.0-rc10`。这是预发布版；Hermes + macOS 已实测（腾讯文档与飞书多维表格两条线都在跑），WorkBuddy 的工作空间安装已完成隔离测试，仍需业务电脑实测。要求 Python 3.9+，零第三方 Python 依赖。
 
 **依赖按数据源算**：接腾讯文档只需 `TENCENT_DOCS_TOKEN`，什么都不用装；接飞书多维表格需要 Node.js + `lark-cli` 并完成 `lark-cli auth login`，但**不需要腾讯文档凭证**。程序绝不自动安装 lark-cli，找不到时会停下来说清怎么装。Windows 尚未验证。
 

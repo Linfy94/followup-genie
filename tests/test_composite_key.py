@@ -164,5 +164,79 @@ class JudgementTest(unittest.TestCase):
         self.assertEqual({i.key for i in rep.due}, {"1|甲公司", "1|乙公司"})
 
 
+
+class ScopeAwareKeyAssertionTest(unittest.TestCase):
+    """
+    🔴 主键断言只对**责任范围内**的行判致命。
+
+    判定里只有范围内的行会产生催办状态（范围外的直接计入「范围外」跳过），
+    所以范围外的空主键伤不到任何东西 —— 为它停掉整条业务线不成比例。
+
+    2026-08-10 实测：GEO 表有 4 行把「提问关键词」误填进了企业列
+    （无序号、无分行），责任范围内 0 行，却让整份 132 行的台账读不了。
+
+    但降级**不能变成静默放行**：范围外的问题照样每天出现在数据质量警告里，
+    而真正的系统性读失败（整列读成空串）必然同时命中范围内的行，仍然致命。
+    """
+
+    def _assert(self, rows):
+        s = FakeSheet(["序号", "企业", "分行", "已发货", "进入时间"], rows)
+        l = base_ledger(required_columns=["序号", "企业", "分行", "已发货", "进入时间"])
+        l["key_field"] = ["序号", "企业"]
+        l["name_field"] = "企业"
+        l["scope_filters"] = [{"field": "分行", "op": "in", "values": ["杭州分行"]}]
+        return core.assert_sheet(s, l, ruleset())
+
+    def _row(self, num, name, branch):
+        return {"序号": num, "企业": name, "分行": branch,
+                "已发货": "", "进入时间": TODAY}
+
+    def test_blank_key_outside_scope_is_a_warning_not_fatal(self):
+        a = self._assert([
+            self._row("1", "甲公司", "杭州分行"),
+            self._row("", "提问关键词误填进企业列", ""),      # 范围外、没序号
+        ])
+        self.assertEqual([e for e in a.fatal if "空值" in e], [])
+        self.assertTrue(any("责任范围外" in w for w in a.warnings), a.warnings)
+
+    def test_blank_key_inside_scope_is_still_fatal(self):
+        """护栏的力度一点没减：范围内的空主键照样拦死。"""
+        a = self._assert([
+            self._row("1", "甲公司", "杭州分行"),
+            self._row("", "乙公司", "杭州分行"),
+        ])
+        self.assertTrue(any("空值" in e for e in a.fatal), a.fatal)
+
+    def test_systemic_read_failure_is_still_fatal(self):
+        """整列读成空串（NUMBER 型用 string_value 读）必然命中范围内的行。"""
+        a = self._assert([self._row("", "甲公司", "杭州分行"),
+                          self._row("", "乙公司", "杭州分行")])
+        self.assertTrue(any("空值" in e for e in a.fatal), a.fatal)
+
+    def test_duplicate_outside_scope_is_a_warning(self):
+        a = self._assert([
+            self._row("1", "甲公司", "杭州分行"),
+            self._row("9", "丙公司", "北京分行"),
+            self._row("9", "丙公司", "北京分行"),
+        ])
+        self.assertEqual([e for e in a.fatal if "重复值" in e], [])
+        self.assertTrue(any("责任范围外" in w for w in a.warnings), a.warnings)
+
+    def test_duplicate_inside_scope_is_still_fatal(self):
+        a = self._assert([
+            self._row("1", "甲公司", "杭州分行"),
+            self._row("1", "甲公司", "杭州分行"),
+        ])
+        self.assertTrue(any("重复值" in e for e in a.fatal), a.fatal)
+
+    def test_ledger_without_scope_filters_is_unchanged(self):
+        """🔴 没配 scope_filters 的台账（盒子线以外都算）行为必须一字不变。"""
+        s = FakeSheet(["序号", "企业", "已发货", "进入时间"],
+                      [{"序号": "", "企业": "甲公司", "已发货": "", "进入时间": TODAY}])
+        l = base_ledger(required_columns=["序号", "企业", "已发货", "进入时间"])
+        l["key_field"] = ["序号", "企业"]
+        l["name_field"] = "企业"
+        a = core.assert_sheet(s, l, ruleset())
+        self.assertTrue(any("空值" in e for e in a.fatal), a.fatal)
 if __name__ == "__main__":
     unittest.main()
