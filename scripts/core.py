@@ -359,7 +359,9 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
                 # 🔴 这一道是**离线**的 —— 2026-08-10 之前 repeat 只在
                 #    assert_sheet 里查，而那要真读到台账才跑，于是
                 #    `doctor --validate-config` 对着一个会炸的配置报「全部通过」。
-                if n.get("enabled") and isinstance(n.get("repeat"), (dict, type(None))):
+                #    repeat 不是对象时也要走进去 —— 它自己会报「必须是对象」，
+                #    在这里先按类型筛掉等于把最常见的手滑放行到运行时。
+                if n.get("enabled"):
                     errs.extend(repeat_errors(n.get("repeat"), where))
                 thr = n.get("threshold")
                 if thr is None:
@@ -1606,6 +1608,12 @@ repeat_forms = ("days", "workdays", "weekday", "monthday")
 _WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 
+def _rep(rep) -> dict:
+    """repeat 一律先归一成字典 —— 判定期不因为配置写成别的类型而裸崩。
+    合法性由 repeat_errors 在校验期把关，这里只保证不炸。"""
+    return rep if isinstance(rep, dict) else {}
+
+
 def _members(raw, scalar_types) -> list:
     """标量或数组都归一成列表 —— 与 clock.fallback 同一个放宽路子。"""
     if isinstance(raw, scalar_types) and not isinstance(raw, bool):
@@ -1616,7 +1624,7 @@ def _members(raw, scalar_types) -> list:
 def repeat_weekdays(rep: dict) -> list[int]:
     """repeat.weekday → 星期索引列表（周一=0）。收字符串或字符串数组。"""
     out: list[int] = []
-    for value in _members((rep or {}).get("weekday"), str):
+    for value in _members(_rep(rep).get("weekday"), str):
         idx = _WEEKDAY_INDEX.get(value) if isinstance(value, str) else None
         if idx is not None and idx not in out:
             out.append(idx)
@@ -1626,7 +1634,7 @@ def repeat_weekdays(rep: dict) -> list[int]:
 def repeat_monthdays(rep: dict) -> list[int]:
     """repeat.monthday → 几号列表（1~31）。收整数或整数数组。"""
     out: list[int] = []
-    for value in _members((rep or {}).get("monthday"), int):
+    for value in _members(_rep(rep).get("monthday"), int):
         if isinstance(value, bool) or not isinstance(value, int):
             continue
         if 1 <= value <= 31 and value not in out:
@@ -1659,8 +1667,18 @@ def repeat_errors(rep: dict, where: str) -> list[str]:
        才炸 TypeError —— 离线校验没覆盖到 repeat，这个函数就是来补这个的。
     """
     errs: list[str] = []
-    rep = rep or {}
-    forms = [k for k in repeat_forms if rep.get(k)]
+    if rep is None:
+        rep = {}
+    if not isinstance(rep, dict):
+        # 业务照着中文说明写成 "repeat": "每周一" 是最自然的手滑。
+        # 不拦的话运行时是一句 AttributeError —— 校验函数自己变成了错误本身。
+        return [f"{where}的 repeat 必须是对象，"
+                f'如 {{"weekday": ["Mon", "Thu"]}}，实际是 {rep!r}']
+    # 🔴 按「键在不在」判，不按值真不真。业务改节律改到一半（旧值删空了、
+    #    键忘了删，又加了一行新的）会写出 {"weekday": [], "days": 7} ——
+    #    按真值判会看成「只配了 days」而放行，于是节律看着改成 weekday 了、
+    #    实际按 days 走，且没有任何地方会说出来。
+    forms = [k for k in repeat_forms if k in rep]
     if not forms:
         errs.append(
             f"{where}缺少 repeat（复提醒间隔）。不允许默认成「只催一次」，"
@@ -1675,9 +1693,19 @@ def repeat_errors(rep: dict, where: str) -> list[str]:
             f"{where}的 repeat 同时配了 {'、'.join(forms)}，只能配一种。"
             f"多配的那种会被静默忽略，所以不许这么写。"
         )
-    raw_weekday = rep.get("weekday")
-    if raw_weekday:
-        members = _members(raw_weekday, str)
+    for key in ("days", "workdays"):
+        if key not in rep:
+            continue
+        n = rep[key]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            # 🔴 负数是这里面最坏的一种：它**不炸**。判定是
+            #    `(today - last).days >= int(days)`，负数恒真，于是节律
+            #    静默变成「每天提醒」，而配置看起来是配过的。
+            errs.append(
+                f"{where}的 repeat.{key} 必须是 ≥1 的整数，实际是 {n!r}。"
+                f"（小数会被静默截断、负数会变成每天提醒，所以都不许写）")
+    if "weekday" in rep:
+        members = _members(rep.get("weekday"), str)
         bad = [m for m in members if not (isinstance(m, str) and m in _WEEKDAY_INDEX)]
         if bad or not members:
             errs.append(
@@ -1685,9 +1713,8 @@ def repeat_errors(rep: dict, where: str) -> list[str]:
                 f"只能是 Mon/Tue/Wed/Thu/Fri/Sat/Sun 或其全称"
                 f"（单个字符串或字符串数组都行）"
             )
-    raw_monthday = rep.get("monthday")
-    if raw_monthday:
-        members = _members(raw_monthday, int)
+    if "monthday" in rep:
+        members = _members(rep.get("monthday"), int)
         bad = [m for m in members
                if isinstance(m, bool) or not isinstance(m, int) or not (1 <= m <= 31)]
         if bad or not members:
@@ -1706,7 +1733,7 @@ def cadence_text(rep: dict) -> str:
     **只有这一份实现**，两套渲染与静默期日志共用 —— 分开各写一遍的话，
     迟早只改了一处。认不出来的形状返回空串：不猜，宁可不显示。
     """
-    rep = rep or {}
+    rep = _rep(rep)
     weekdays = repeat_weekdays(rep)
     if weekdays:
         return "/".join(_WEEKDAY_CN[i] for i in weekdays) + "提醒"

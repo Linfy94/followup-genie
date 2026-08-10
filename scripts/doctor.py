@@ -119,14 +119,15 @@ def check_configs(doc: Doc) -> tuple[dict, dict, dict] | None:
             doc.add(WARN, f"节点「{n.get('name')}」未启用（不会产生任何催办）",
                     n.get("_禁用原因") or "配置里 enabled=false")
         # 阈值与复提醒必填
+        # 🔴 repeat 的检查**必须调 core 的那一份**，不许在这里再写一遍。
+        #    自带一份的下场已经见过：它只认 days/workdays/weekday，
+        #    rc8 加的 monthday 没跟上，配了 monthday 的节点会被误报「缺 repeat」。
         for n in on:
             thr = n.get("threshold") or {}
-            rep = n.get("repeat") or {}
             if not ("days" in thr or "workdays" in thr):
                 doc.add(BAD, f"节点「{n.get('name')}」缺 threshold.days/workdays")
-            if not (rep.get("days") or rep.get("workdays") or rep.get("weekday")):
-                doc.add(BAD, f"节点「{n.get('name')}」缺 repeat（复提醒间隔）",
-                        "不允许默认成「只催一次」")
+            for e in core.repeat_errors(n.get("repeat"), f"节点「{n.get('name')}」"):
+                doc.add(BAD, "复提醒节律配置有误", e)
 
         # ── 阈值边界对照表 ──
         # 「满7天」到底是第7天还是第8天提醒，光看 threshold.days 看不出来。
@@ -140,15 +141,10 @@ def check_configs(doc: Doc) -> tuple[dict, dict, dict] | None:
                 bad_boundary = True
                 rows.append(f"{n.get('name'):<10} boundary={b!r} 🔴 不合法")
                 continue
-            rep = n.get("repeat") or {}
-            if rep.get("weekday"):
-                every = f"只在每周{rep['weekday']}提醒"
-            elif rep.get("workdays"):
-                every = f"每 {rep['workdays']} 个工作日"
-            elif rep.get("days"):
-                every = f"每 {rep['days']} 天"
-            else:
-                every = "—"
+            # 节律文案只有一份实现（core.cadence_text），两套渲染与这张
+            # 口径表共用 —— 这张表是给业务核对「规则改成什么了」的凭证，
+            # 和推送里说的必须是同一句话。
+            every = core.cadence_text(n.get("repeat")) or "—"
             mark = "" if n.get("enabled") else "（未启用）"
             unit = "个工作日" if "workdays" in thr else "天"
             amount = thr.get("workdays") if "workdays" in thr else thr.get("days")
