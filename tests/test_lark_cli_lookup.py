@@ -30,14 +30,21 @@ from unittest import mock
 
 from harness import core  # noqa: F401 —— 挂 sys.path
 
+import cli_env      # noqa: E402 —— 查找与 PATH 拼装的实现住在这里
 import lark_base  # noqa: E402
 from qqdoc import LedgerError  # noqa: E402
 
 
 class FindsLarkCliTest(unittest.TestCase):
+    """
+    mock 靶子是 `cli_env` 而不是 `lark_base`：0.4.0-rc10 起，「找可执行文件 +
+    拼子进程 PATH + 剔 Agent 变量」这三件事被 lark-cli 与 wecom-cli 共用，
+    实现搬进了 cli_env。`lark_base.lark_cli_bin()` 仍在，是一层薄包装。
+    """
+
 
     def test_prefers_path_when_available(self):
-        with mock.patch.object(lark_base.shutil, "which",
+        with mock.patch.object(cli_env.shutil, "which",
                                return_value="/somewhere/bin/lark-cli"):
             self.assertEqual(lark_base.lark_cli_bin(), "/somewhere/bin/lark-cli")
 
@@ -48,14 +55,14 @@ class FindsLarkCliTest(unittest.TestCase):
         """
         home = Path(os.path.expanduser("~"))
         target = home / ".local" / "bin" / "lark-cli"
-        with mock.patch.object(lark_base.shutil, "which", return_value=None), \
-             mock.patch.object(lark_base.Path, "exists",
+        with mock.patch.object(cli_env.shutil, "which", return_value=None), \
+             mock.patch.object(cli_env.Path, "exists",
                                lambda self: self == target):
             self.assertEqual(lark_base.lark_cli_bin(), str(target))
 
     def test_returns_none_when_really_absent(self):
-        with mock.patch.object(lark_base.shutil, "which", return_value=None), \
-             mock.patch.object(lark_base.Path, "exists", lambda self: False):
+        with mock.patch.object(cli_env.shutil, "which", return_value=None), \
+             mock.patch.object(cli_env.Path, "exists", lambda self: False):
             self.assertIsNone(lark_base.lark_cli_bin())
 
 

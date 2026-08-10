@@ -19,11 +19,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from datetime import date, datetime
-from pathlib import Path
 
+import cli_env
 from qqdoc import LedgerError
 
 ALLOWED_SUBCOMMANDS = frozenset({"+table-list", "+field-list", "+record-list"})
@@ -34,94 +33,30 @@ PAGE_SIZE = 200
 _DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d")
 
 
+# 🔴 找可执行文件、拼 PATH、剔 Agent 变量这三件事**与 wecom_doc 完全一样**，
+#    已经提到 cli_env.py 共用。下面三个名字保留成薄包装：现有测试与调用方
+#    一个字都不用改，而实现只有一份 —— 复制粘贴的后果是改了一处忘了另一处，
+#    而那一处每天静默跳过一整条业务线。
+AGENT_CONTEXT_VARS = cli_env.AGENT_CONTEXT_VARS
+
+# lark-cli 自己的开关（免更新提示），与环境剔除无关，所以留在这边。
+_LARK_ENV = {
+    "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1",
+    "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1",
+}
+
+
 def lark_cli_bin() -> str | None:
-    """
-    找到 lark-cli 可执行文件。
-
-    🔴 不能只靠 PATH。cron 由 launchd 托管的 gateway 派生，它的 PATH 比登录
-    shell 短得多 —— 2026-08-04 09:00 那次就栽在这里：`lark-cli` 明明装在
-    ~/.local/bin，两条哨兵线却双双报「本机没有安装」，主任务退出码 1。
-
-    这个坑项目里早就防过一次（check_followup._hermes_bin 的同名注释），
-    只是当时没推广到这里。候选路径与那边保持一致。
-    """
-    found = shutil.which("lark-cli")
-    if found:
-        return found
-    home = Path(os.path.expanduser("~"))
-    for cand in (home / ".local" / "bin" / "lark-cli",
-                 home / ".hermes" / "bin" / "lark-cli",
-                 Path("/opt/homebrew/bin/lark-cli"),
-                 Path("/usr/local/bin/lark-cli")):
-        if cand.exists():
-            return str(cand)
-    return None
+    """找到 lark-cli 可执行文件（候选路径见 cli_env.find_bin）。"""
+    return cli_env.find_bin("lark-cli")
 
 
 def _child_path(exe: str) -> str:
-    """
-    给 lark-cli 子进程用的 PATH。
-
-    🔴 光找到 lark-cli 还不够：它的 shebang 是 `#!/usr/bin/env node`，
-    **执行时还要再找一次 node**。PATH 里没有 node 的话，报出来的是
-    `env: node: No such file or directory` —— 一句和"没装 lark-cli"
-    毫不相干的错，排查时很容易被带偏。
-
-    node 通常和 lark-cli 装在同一个目录（本机都在 ~/.local/bin），
-    所以把 exe 所在目录放最前，再补几个常见位置，最后接继承来的 PATH。
-    """
-    home = Path(os.path.expanduser("~"))
-    parts = [str(Path(exe).parent),
-             str(home / ".local" / "bin"),
-             str(home / ".hermes" / "node" / "bin"),
-             "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-    # 继承的 PATH 要**逐段**拼进来。整段 append 的话去重就形同虚设 ——
-    # 本机实测会拼出 28 段里 7 段重复。
-    parts.extend(os.environ.get("PATH", "").split(":"))
-    seen, out = set(), []
-    for p in parts:
-        if p and p not in seen:
-            seen.add(p)
-            out.append(p)
-    return ":".join(out)
-
-
-# ── lark-cli 的 Agent context 探测信号 ──────────────────────────────────
-# 命中其中任意一个，lark-cli 就拒绝执行并报
-# "hermes context detected but lark-cli is not bound to it"。
-#
-# 🔴 这张清单是**实测枚举**出来的，不是照抄文档。做法是同一个二进制、
-#    同一台机器、同一秒，唯一变量是某一个环境变量，逐个跑
-#    `lark-cli config show` 看是否报错。
-#
-# 🔴 **不要改成 `HERMES_*` 前缀通配。** 实测编造的 `HERMES_ZZZ_BUKEN`
-#    并不触发，通配等于凭空猜上游语义，会把无关变量一起剔掉。
-#
-# 🔴 **上游新增探测变量时会原样复发**，而症状是「今天没有要催的」。
-#    0.4.0-rc2 只剔了前两个就宣告修复，结果 rc4 又栽在 HERMES_EXEC_ASK 上。
-#    当时的验证方法是查 gateway 进程的环境 —— 但 `ps eww` 只显示 exec 时的
-#    初始环境，而这些变量是进程起来之后在 Python 里 `os.environ[...] = ...`
-#    塞进去的（gateway/run.py 的 HERMES_EXEC_ASK、cli.py 的 HERMES_QUIET）。
-#    **看进程环境快照 ≠ 看子进程真正拿到的环境。**
-AGENT_CONTEXT_VARS = (
-    "HERMES_HOME",
-    "OPENCLAW_HOME",
-    "HERMES_EXEC_ASK",       # gateway/run.py 模块级无条件注入 —— rc4 的真凶
-    "HERMES_GATEWAY_TOKEN",
-    "HERMES_SESSION_KEY",
-    "HERMES_QUIET",          # cli.py 模块级无条件注入
-)
+    return cli_env.child_path(exe)
 
 
 def _child_env(exe: str) -> dict:
-    """构造外部 CLI 环境，剔除会触发 Agent 上下文绑定的变量。"""
-    env = dict(os.environ)
-    for name in AGENT_CONTEXT_VARS:
-        env.pop(name, None)
-    env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
-    env["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
-    env["PATH"] = _child_path(exe)
-    return env
+    return cli_env.child_env(exe, _LARK_ENV)
 
 
 def _run_cli(subcommand: str, args: list[str]) -> dict:
