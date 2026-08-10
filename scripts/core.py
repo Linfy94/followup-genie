@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover —— Windows 尚未列入本轮支持�
 
 import qqdoc
 import lark_base
+import wecom_doc
 from qqdoc import LedgerError
 
 
@@ -1850,9 +1851,12 @@ def read_ledger_sheet(ledger: dict):
             profile=ledger.get("profile", "sentinel"),
             link_date_fields=ledger.get("link_date_fields"),
         )
+    if source == "wecom_doc":
+        # 🔴 url + sheet_id 必须成对：实测两份不同文档里都有 sheet_id BB08J2。
+        return wecom_doc.read_sheet(ledger["url"], ledger["sheet_id"])
     raise LedgerError(
         f"台账「{ledger.get('name')}」的 source={source!r} 不支持。"
-        f"目前只实现了 tencent_mcp 和 lark_cli。"
+        f"目前只实现了 tencent_mcp、lark_cli 和 wecom_doc。"
     )
 
 
