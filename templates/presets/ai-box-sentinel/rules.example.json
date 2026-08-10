@@ -14,7 +14,7 @@
       {"id": "branch_register", "name": "③分行扫码登记", "stage": "待登记飞书", "enabled": true, "when": [{"field": "当前状态", "op": "equals", "value": "待登记飞书"}], "clock": {"stage_entered": true, "fallback": ["最新进展日期", "需求提出时间"]}, "threshold": {"workdays": 3, "boundary": "after"}, "repeat": {"days": 1}, "cross_ledger": {"ledger_id": "sentinel_lark", "match_fields": [{"local_field": "企业名称", "target_field": "企业名称"}, {"local_field": "分行", "target_field": "分行/地区", "normalize_map": {"杭州": "杭州", "杭州分行": "杭州", "深圳": "深圳", "深圳分行": "深圳"}}]}}
     ]},
     "sentinel_lark": {"nodes": [
-      {"id": "ship", "name": "④发货", "stage": "待发货", "enabled": true, "when": [{"field": "AI哨兵发货表", "op": "empty"}], "clock": {"field": "立项时间"}, "threshold": {"days": 0, "boundary": "on"}, "repeat": {"weekday": "Wed"}},
+      {"id": "ship", "name": "④发货", "stage": "待发货", "enabled": true, "when": [{"field": "AI哨兵发货表", "op": "empty"}], "clock": {"field": "立项时间"}, "threshold": {"days": 0, "boundary": "on"}, "repeat": {"weekday": ["Mon", "Thu"]}},
       {"id": "install", "name": "⑤安装", "stage": "待安装", "enabled": true, "when": [{"field": "AI哨兵发货表", "op": "not_empty"}, {"field": "安装情况", "op": "not_contains", "value": "已完成"}], "clock": {"stage_entered": true, "fallback": "立项时间"}, "threshold": {"days": 7, "boundary": "after"}, "repeat": {"days": 7}}
     ]}
   },
