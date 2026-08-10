@@ -79,10 +79,14 @@ class LarkRequiredFieldsTest(unittest.TestCase):
                         f"报错要指名是哪一份台账，否则多台账时无从下手：{e}")
 
     def test_unknown_source_is_rejected(self):
-        e = errors([lark_ledger(source="wecom_doc")])
-        self.assertTrue(any("wecom_doc" in x for x in e), e)
-        self.assertTrue(any("tencent_mcp" in x and "lark_cli" in x for x in e),
-                        f"要列出支持哪些，否则不知道该填什么：{e}")
+        # 这条原来拿 "wecom_doc" 当「不支持的 source」举例 —— 0.4.0-rc10 起
+        # 它是真的支持了，再拿它当反例就变成在测「企微台账缺 url」。
+        # 换一个不会成真的值。
+        e = errors([lark_ledger(source="根本不存在的数据源")])
+        self.assertTrue(any("根本不存在的数据源" in x for x in e), e)
+        self.assertTrue(
+            any("tencent_mcp" in x and "lark_cli" in x and "wecom_doc" in x for x in e),
+            f"要列出支持哪些，否则不知道该填什么：{e}")
 
     def test_tencent_ledger_still_needs_its_own_fields(self):
         e = errors([{"id": "box", "source": "tencent_mcp", "enabled": True,

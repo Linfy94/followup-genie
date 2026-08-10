@@ -172,10 +172,19 @@ def _validate_source_fields(l: dict, pos: int) -> list[str]:
             if not l.get(f):
                 errs.append(f"{where}的 source 是 lark_cli，缺少 {f}（{hint}）")
         errs.extend(_validate_link_date_fields(l, where))
+    elif source == "wecom_doc":
+        # 🔴 url 与 sheet_id 必须成对：实测两份不同的企微文档里都有
+        #    sheet_id `BB08J2` 的子表 —— sheet_id 只在文档内唯一。
+        for f, hint in (("url", "企微在线表格的访问链接"),
+                        ("sheet_id", "子表 id；它只在文档内唯一，必须和 url 成对")):
+            if not l.get(f):
+                errs.append(f"{where}的 source 是 wecom_doc，缺少 {f}（{hint}）")
     else:
         errs.append(
             f"{where}的 source={source!r} 不支持。"
-            f"目前实现了 tencent_mcp（腾讯文档）和 lark_cli（飞书多维表格）。")
+            f"目前实现了 tencent_mcp（腾讯文档）、lark_cli（飞书多维表格）"
+            f"和 wecom_doc（企业微信在线表格）。")
+    errs.extend(stage_seed_errors(l, where))
     return errs
 
 
@@ -1749,9 +1758,72 @@ def cadence_text(rep: dict) -> str:
     return ""
 
 
+# ── 计时起点的人工播种 ──────────────────────────────────────────────────
+#
+# 有的台账**一个可靠的日期列都没有**。GEO 那张就是：「需求提出时间」写成
+# `6.12`（没有年份）且一大半是空，「结束优化时间」混着「优化中」「7.9有成效」
+# 「/」，「启动优化时间」其实是状态列。没有起点就算不出「卡了多久」。
+#
+# 这种表只能人工读一遍、把每条的起点定下来。播种表就是那份结论。
+#
+# 🔴 为什么放**配置仓**而不是直接写 state 文件：
+#    ① git 留痕，每条都写明依据，业务可以复核；
+#    ② 状态目录被清掉或重装之后播种还在；
+#    ③ 不碰生产状态文件（铁律④）。
+#
+# 🔴 播种只是**兜底的一级**，永远排在真实快照之后 —— 见 resolve_clock。
+#    反过来的话，程序观测到的真实节点变更会被一条写死的旧日期永久盖住。
+
+def stage_seed_errors(ledger: dict, where: str) -> list[str]:
+    """
+    播种表的合法性检查。**离线校验与运行时共用这一份。**
+
+    🔴 写坏了不能静默丢掉。丢掉的后果是这一条回退到「无可用起点」而被跳过 ——
+       又是一次「配置里明明配了、实际没生效」，而且没有任何地方会说出来。
+       同一个形状已经在 alert.timeout_seconds、repeat 上各中过一次。
+    """
+    seeds = ledger.get("manual_stage_entered")
+    if seeds is None:
+        return []
+    if not isinstance(seeds, list):
+        return [f"{where}的 manual_stage_entered 应该是数组，实际是{_type_name(seeds)}"]
+    errs: list[str] = []
+    for i, s in enumerate(seeds, start=1):
+        at = f"{where}的 manual_stage_entered 第 {i} 条"
+        if not isinstance(s, dict):
+            errs.append(f"{at}应该是对象，实际是{_type_name(s)}")
+            continue
+        for f in ("key", "node", "entered"):
+            if not s.get(f):
+                errs.append(f"{at}缺少 {f}")
+        entered = s.get("entered")
+        if entered and parse_iso(str(entered)) is None:
+            errs.append(f"{at}的 entered={entered!r} 不是 YYYY-MM-DD 日期")
+        if not s.get("confirmed"):
+            # 依据必须写下来 —— 一年后没人记得这个日期是怎么来的，
+            # 而它正在决定某个项目每天催不催。
+            errs.append(f"{at}缺少 confirmed（这条起点是怎么定出来的，写给复核的人看）")
+    return errs
+
+
+def stage_seed_map(ledger: dict) -> dict:
+    """播种表 → {(key, node_id): (日期, 依据)}。合法性已由 stage_seed_errors 把关。"""
+    out: dict = {}
+    for s in ledger.get("manual_stage_entered") or []:
+        if not isinstance(s, dict):
+            continue
+        when = parse_iso(str(s.get("entered") or ""))
+        if when is None:
+            continue
+        out[(str(s.get("key")), str(s.get("node")))] = (when, s.get("confirmed", ""))
+    return out
+
+
 def resolve_clock(node: dict, get_text, get_date, stage_entered: dict,
                   state_key: str, last_snapshot_date: date | None,
-                  last_snapshot_node: str | None, node_id: str) -> tuple[date | None, str]:
+                  last_snapshot_node: str | None, node_id: str,
+                  seed: dict | None = None, seed_key: str | None = None
+                  ) -> tuple[date | None, str]:
     """
     确定这个节点的计时起点，返回 (起点日期, 起点来源说明)。
 
@@ -1789,6 +1861,14 @@ def resolve_clock(node: dict, get_text, get_date, stage_entered: dict,
     recorded = parse_iso(stage_entered.get(state_key))
     if recorded:
         return recorded, "快照累积的节点进入时间"
+
+    # 🔴 人工播种：**排在真实快照之后、fallback 之前**，一级都不能挪。
+    #    排到快照前面的话，程序观测到的节点变更会被一条写死的旧日期永久盖住，
+    #    而项目推进了却还按旧起点算超期 —— 天数只会越算越大，没人看得出不对。
+    seeded = (seed or {}).get((seed_key, node_id))
+    if seeded:
+        when, basis = seeded
+        return when, f"人工播种起点（{basis}）" if basis else "人工播种起点"
 
     # 该 (项目, 节点) 没有在跑的周期。三种情形：
     #   a) 首次运行（没有上次快照）→ 用 fallback，这是上面说的那个陷阱
@@ -1971,6 +2051,8 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
     key_field = ledger.get("key_field", "序号")
     name_field = ledger.get("name_field", "项目名称")
     paused_map = {str(p.get("key")): p.get("reason", "") for p in (ledger.get("paused") or [])}
+    # 计时起点的人工播种，给那些一个可靠日期列都没有的台账用（见 stage_seed_map）
+    seed = stage_seed_map(ledger)
     # 灰名单支持对象数组与旧的字符串数组两种写法，统一由 manual_list_entries 规整
     gray = {e["key"] for e in manual_list_entries(ledger, "gray_list_for_review")}
 
@@ -2083,7 +2165,8 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
                 )
 
         start, src = resolve_clock(current, get_text, get_date, stage_entered,
-                                   state_key, last_snap_date, last_snap_node, node_id)
+                                   state_key, last_snap_date, last_snap_node, node_id,
+                                   seed=seed, seed_key=key)
         if start is None:
             rep.warnings.append(f"{key} {name}：{current['name']} 无可用计时起点，跳过")
             rep.no_node += 1
