@@ -15,6 +15,7 @@
 
 from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
 
+import calendar
 import json
 import os
 import sys
@@ -1362,16 +1363,43 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         if not node.get("enabled"):
             continue
         rep = node.get("repeat") or {}
-        if not (rep.get("days") or rep.get("workdays") or rep.get("weekday")):
+        forms = [k for k in repeat_forms if rep.get(k)]
+        if not forms:
             a.fatal.append(
                 f"节点「{node.get('name')}」缺少 repeat（复提醒间隔）。"
                 f"不允许默认成「只催一次」，请在 rules.json 里补上。"
+                f"可用写法：days / workdays / weekday / monthday。"
             )
-        if rep.get("weekday") and rep["weekday"] not in _WEEKDAY_INDEX:
+        if len(forms) > 1:
+            # 🔴 判定是 if weekday … elif monthday … elif workdays … else days，
+            #    同时配两种会让后面那种被**静默忽略**。而业务改节律时最可能的
+            #    动作恰恰是「加一行新的、忘了删旧的」—— 后果是节律看着改了、
+            #    实际没改，且没有任何地方会说出来。这里直接拦死。
             a.fatal.append(
-                f"节点「{node.get('name')}」的 repeat.weekday＝{rep['weekday']!r} "
-                f"不合法，只能是 Mon/Tue/Wed/Thu/Fri/Sat/Sun 或其全称"
+                f"节点「{node.get('name')}」的 repeat 同时配了 {'、'.join(forms)}，"
+                f"只能配一种。多配的那种会被静默忽略，所以不许这么写。"
             )
+        raw_weekday = rep.get("weekday")
+        if raw_weekday:
+            bad = [m for m in _members(raw_weekday, str)
+                   if not (isinstance(m, str) and m in _WEEKDAY_INDEX)]
+            if bad or not _members(raw_weekday, str):
+                a.fatal.append(
+                    f"节点「{node.get('name')}」的 repeat.weekday 里 {bad!r} "
+                    f"不合法，只能是 Mon/Tue/Wed/Thu/Fri/Sat/Sun 或其全称"
+                    f"（单个字符串或字符串数组都行）"
+                )
+        raw_monthday = rep.get("monthday")
+        if raw_monthday:
+            bad = [m for m in _members(raw_monthday, int)
+                   if isinstance(m, bool) or not isinstance(m, int)
+                   or not (1 <= m <= 31)]
+            if bad or not _members(raw_monthday, int):
+                a.fatal.append(
+                    f"节点「{node.get('name')}」的 repeat.monthday 里 {bad!r} "
+                    f"不合法，只能是 1~31 的整数（单个整数或整数数组都行）。"
+                    f"配 31 时，当月不足 31 天则按当月最后一天算。"
+                )
         thr = node.get("threshold") or {}
         # 存在性用 in 判断，不用真值判断——threshold.days=0 是合法值
         # （"进入即算超期"，靠 repeat.weekday 管节奏），不能被当成"没填"。
@@ -1589,6 +1617,86 @@ def clock_fallback_fields(clock: dict) -> list[str]:
     if isinstance(fallback, list) and all(isinstance(value, str) for value in fallback):
         return [value.strip() for value in fallback if value.strip()]
     return []
+
+
+# ── 复提醒节律 ──────────────────────────────────────────────────────
+#
+# 业务改提醒时间是常态，**不该每次都要改代码**。2026-08-10 就栽过：
+# 业务把哨兵④发货从「每周三」改成「每周一和每周四」，纯口径改动，
+# 却因为 repeat.weekday 只收单个字符串而必须动判定引擎；在那之前的一周里
+# 项目每周一都从清单上消失，而业务以为系统漏了它。
+#
+# 四种写法互斥，各自独立：days / workdays / weekday / monthday。
+# 合法性由 assert_sheet 在**配置校验期**把关；下面这几个归一化函数
+# 一律防御性返回空，判定期不因为配置写错而崩。
+
+repeat_forms = ("days", "workdays", "weekday", "monthday")
+
+_WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _members(raw, scalar_types) -> list:
+    """标量或数组都归一成列表 —— 与 clock.fallback 同一个放宽路子。"""
+    if isinstance(raw, scalar_types) and not isinstance(raw, bool):
+        return [raw]
+    return list(raw) if isinstance(raw, list) else []
+
+
+def repeat_weekdays(rep: dict) -> list[int]:
+    """repeat.weekday → 星期索引列表（周一=0）。收字符串或字符串数组。"""
+    out: list[int] = []
+    for value in _members((rep or {}).get("weekday"), str):
+        idx = _WEEKDAY_INDEX.get(value) if isinstance(value, str) else None
+        if idx is not None and idx not in out:
+            out.append(idx)
+    return sorted(out)
+
+
+def repeat_monthdays(rep: dict) -> list[int]:
+    """repeat.monthday → 几号列表（1~31）。收整数或整数数组。"""
+    out: list[int] = []
+    for value in _members((rep or {}).get("monthday"), int):
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        if 1 <= value <= 31 and value not in out:
+            out.append(value)
+    return sorted(out)
+
+
+def monthday_hits(day: date, wanted: list[int]) -> bool:
+    """
+    今天是不是配置里的某个「几号」。
+
+    🔴 配了 31 而当月只有 30 天时**按当月最后一天算**，不是整月不发。
+       静默跳过一整个月又是一次「看着配了、实际不发」—— 正是这个项目
+       一路在消灭的那个形状。
+    """
+    if not wanted:
+        return False
+    last = calendar.monthrange(day.year, day.month)[1]
+    return any(min(w, last) == day.day for w in wanted)
+
+
+def cadence_text(rep: dict) -> str:
+    """
+    把复提醒节律写成人话，给业务在推送里核对「规则改成什么了」。
+
+    **只有这一份实现**，两套渲染与静默期日志共用 —— 分开各写一遍的话，
+    迟早只改了一处。认不出来的形状返回空串：不猜，宁可不显示。
+    """
+    rep = rep or {}
+    weekdays = repeat_weekdays(rep)
+    if weekdays:
+        return "/".join(_WEEKDAY_CN[i] for i in weekdays) + "提醒"
+    monthdays = repeat_monthdays(rep)
+    if monthdays:
+        return "每月 " + "/".join(str(d) for d in monthdays) + " 号提醒"
+    if rep.get("workdays"):
+        return f"每 {int(rep['workdays'])} 个工作日提醒"
+    if rep.get("days"):
+        n = int(rep["days"])
+        return "每天提醒" if n == 1 else f"每 {n} 天提醒"
+    return ""
 
 
 def resolve_clock(node: dict, get_text, get_date, stage_entered: dict,
@@ -1957,16 +2065,15 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
         st.setdefault("first_overdue", iso(today))
         last = parse_iso(st.get("last_notified"))
         rep_cfg = current.get("repeat") or {}
-        if rep_cfg.get("weekday"):
-            # 日历节律：不是"距上次过了几天"，是"只在某个星期几提醒"——
+        weekdays = repeat_weekdays(rep_cfg)
+        monthdays = repeat_monthdays(rep_cfg)
+        if weekdays:
+            # 日历节律：不是"距上次过了几天"，是"只在这几个星期几提醒"——
             # 首次超期也不例外，否则第一条会在错的日子被催出去。
-            target_wd = _WEEKDAY_INDEX.get(rep_cfg["weekday"])
-            if target_wd is None:
-                raise LedgerError(
-                    f"节点「{current.get('name')}」的 repeat.weekday="
-                    f"{rep_cfg['weekday']!r} 不是合法的星期几"
-                )
-            due = today.weekday() == target_wd
+            due = today.weekday() in weekdays
+        elif monthdays:
+            # 同上，只不过锚在「几号」。月末回退见 monthday_hits。
+            due = monthday_hits(today, monthdays)
         elif last is None:
             due = True  # 首次超期，一定催
         elif rep_cfg.get("workdays"):
@@ -1976,6 +2083,8 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
 
         item.extra["first_overdue"] = st["first_overdue"]
         item.extra["last_notified"] = st.get("last_notified")
+        # 待催和静默两份都带上：静默期日志正是靠它解释「今天为什么没有它」
+        item.extra["cadence"] = cadence_text(rep_cfg)
         if due:
             rep.due.append(item)
         else:
