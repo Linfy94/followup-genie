@@ -279,6 +279,91 @@ class WecomRenderTest(unittest.TestCase):
         self.assertLess(wecom_push._bytes(self.md), 4096)
 
 
+class MutedSectionTest(unittest.TestCase):
+    """
+    静默期清单：只进日志，绝不进企微。
+
+    2026-08-10 的由来：业务问「某个项目至今没发货，怎么不提醒」。
+    它其实前几天催过、正在等下一个提醒日 —— 但「等下次」和「判定认为不用催」
+    在推送和日志里长得一模一样，查了半天才分清。业务同时明确：
+    **这批不要推给她**，推送只回答「今天该做什么」。
+    """
+
+    def _reports_with_muted(self):
+        """造一批已经催过、今天不到复提醒日的项目。"""
+        import qqdoc
+        from unittest import mock
+        sheet = collect_rows([26, 30], tech="待收资")
+        led = ledgers_cfg()["ledgers"][0]
+        rules = rules_cfg()
+        wd = core.WorkdayCalc(rules["workday"], None)
+        # 昨天刚催过，而 box①收资 是隔周（days=7）→ 今天必然静默
+        state = {f"box|{i}|collect": {"first_overdue": str(TODAY - timedelta(days=10)),
+                                      "last_notified": str(TODAY - timedelta(days=1))}
+                 for i in (1, 2)}
+        with mock.patch.object(qqdoc, "read_sheet", lambda *a: sheet):
+            rep, _ = core.evaluate_ledger(led, rules["rulesets"]["box"], wd,
+                                          TODAY, {}, state, {}, {})
+        return [rep]
+
+    def setUp(self):
+        self.cfg = output_cfg()
+        self.reps = self._reports_with_muted()
+        self.assertTrue(self.reps[0].overdue_muted, "前置：这批必须真的处在静默期")
+        self.md = check_followup.render_wecom(self.reps, TODAY, self.cfg)
+        self.txt = check_followup.render(self.reps, TODAY, False, self.cfg)
+
+    def test_log_lists_them(self):
+        self.assertIn("【静默期】", self.txt)
+        for it in self.reps[0].overdue_muted:
+            self.assertIn(it.name, self.txt)
+
+    def test_log_says_why_today_is_quiet(self):
+        """光列名字不够 —— 要能看出「上次什么时候催的、多久催一次」。"""
+        self.assertIn("上次提醒", self.txt)
+        self.assertIn("每 7 天提醒", self.txt)
+
+    def test_wecom_never_shows_it(self):
+        """🔴 业务明确不要。这条是本组的锚点。"""
+        self.assertNotIn("静默期", self.md)
+        for it in self.reps[0].overdue_muted:
+            self.assertNotIn(it.name, self.md)
+
+    def test_wording_is_not_the_forbidden_truncation_phrase(self):
+        """
+        🔴 业务口径决策第 3 条：不许出现「…另有 N 条」的截断。
+           静默期不是截断，但措辞长得像就会被读成「清单被砍了」。
+        """
+        self.assertNotIn("另有", self.txt)
+
+    def test_nothing_muted_means_no_section(self):
+        reps = _reports(collect_rows([26, 78, 81]), self.cfg)
+        self.assertFalse(reps[0].overdue_muted)
+        self.assertNotIn("【静默期】",
+                         check_followup.render(reps, TODAY, False, self.cfg))
+
+
+class CadenceOnStageLineTest(unittest.TestCase):
+    """业务改了提醒规则，推送里要能看出来生效的是什么。"""
+
+    def setUp(self):
+        self.cfg = output_cfg()
+        self.reps = _reports(collect_rows([26, 78, 81]), self.cfg)
+        self.md = check_followup.render_wecom(self.reps, TODAY, self.cfg)
+        self.txt = check_followup.render(self.reps, TODAY, False, self.cfg)
+
+    def test_both_renderers_show_it(self):
+        self.assertIn("### 【待收资】3 项 · 每 7 天提醒", self.md)
+        self.assertIn("【待收资】3 项 · 每 7 天提醒", self.txt)
+
+    def test_hidden_when_a_group_mixes_cadences(self):
+        """合并分节后同名阶段可能来自两份台账。挑一个显示等于对另一半撒谎。"""
+        groups = check_followup.group_items(self.reps[0].due, self.cfg)
+        self.assertEqual(len(groups), 1)
+        groups[0]["items"][0].extra["cadence"] = "周一/周四提醒"
+        self.assertEqual(check_followup._one_cadence(groups[0]["items"]), "")
+
+
 class NeverTruncateTest(unittest.TestCase):
     """业务硬要求：每笔项目都要看到，绝不能出现「…另有 N 条」。"""
 

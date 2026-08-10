@@ -237,6 +237,18 @@ class Section:
         return [item for report in self.reports for item in report.due]
 
     @property
+    def muted(self) -> list[core.Item]:
+        """
+        超期、但今天不到复提醒日的项目。
+
+        🔴 只进日志，**绝不进企微**（业务 2026-08-10 明确）。给业务的推送要
+           回答「今天该做什么」，塞进 30 条「已经催过的」只会淹掉它。
+           但排查时必须回答得了「某某为什么不在清单里」—— 2026-08-10
+           就为这个问题查了半天，而答案本来该一眼看到。
+        """
+        return [item for report in self.reports for item in report.overdue_muted]
+
+    @property
     def in_scope(self) -> int:
         # advanced 的语义是源台账项目已在目标台账存在，因此给业务看的
         # 合并分母扣掉源台账这一份；逐台账 total_rows/accounted 完全不动。
@@ -298,8 +310,23 @@ def group_items(items: list, output_cfg: dict) -> list[dict]:
         groups.append({
             "stage": stage, "node_name": node_name, "items": items,
             "cut": cut, "hint_text": hint_text,
+            "cadence": _one_cadence(items),
         })
     return groups
+
+
+def _one_cadence(items: list) -> str:
+    """
+    这一组的复提醒节律，用于在阶段行上显示「多久催一次」。
+
+    业务会改提醒时间规则（2026-08-10 就把发货从每周三改成了周一/周四），
+    改完要能在推送里看出来生效的是什么，而不是等「怎么一直不提醒」才发现。
+
+    合并分节后同一个阶段名可能来自两份台账、节律未必相同。
+    **不一致就不显示** —— 挑一个显示等于对另一半撒谎。
+    """
+    found = {(item.extra or {}).get("cadence") or "" for item in items}
+    return found.pop() if len(found) == 1 else ""
 
 
 def _headline(in_scope: int, due_count: int, groups: list[dict]) -> list[str]:
@@ -405,16 +432,43 @@ def render(reports: list[core.Report], today: date, write_on: bool,
 
         for g in groups:
             lines.append("")
-            lines.append(f"【{g['stage']}】{len(g['items'])} 项")
+            lines.append(f"【{g['stage']}】{len(g['items'])} 项"
+                         + (f" · {g['cadence']}" if g["cadence"] else ""))
             for i, it in enumerate(g["items"]):
                 if g["cut"] is not None and i == g["cut"]:
                     lines.append(f"------- {g['hint_text']} -------")
                 lines.append(f"{i + 1}、{it.name} — 超期 {it.overdue_days} 天")
 
+        _render_muted(lines, section)
+
         for report in section.reports:
             _render_report_tail(lines, report, verbose, write_on)
 
     return "\n".join(lines)
+
+
+def _render_muted(lines: list[str], section: Section) -> None:
+    """
+    静默期清单 —— **只在日志里**，render_wecom() 绝不调用这个函数。
+
+    回答的是排查时唯一重要的那个问题：「某某今天为什么不在清单里？」
+    是判定认为不用催，还是已经催过、在等下一个提醒日？这两种状态在
+    2026-08-10 之前长得一模一样，业务因此以为系统把一个项目漏掉了。
+
+    🔴 措辞不能写成「另有 N 项」—— 业务口径决策第 3 条明令
+       「不许出现『…另有 N 条』的截断」。这里不是截断而是另一类项目，
+       但长得像就会被读成「清单被砍了一半」。
+    """
+    muted = section.muted
+    if not muted:
+        return
+    lines.append("")
+    lines.append(f"【静默期】{len(muted)} 项（已提醒过，等下一个提醒日；不推送给业务）")
+    for it in sorted(muted, key=lambda x: (x.node_name, -x.overdue_days)):
+        last = (it.extra or {}).get("last_notified") or "还没催过"
+        cadence = (it.extra or {}).get("cadence") or "节律未知"
+        lines.append(f"· {it.name} — {it.node_name} 超期 {it.overdue_days} 天"
+                     f" — 上次提醒 {last} — {cadence}")
 
 
 def _render_report_tail(lines: list[str], rep: core.Report,
@@ -502,7 +556,10 @@ def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
 
         for g in groups:
             L.append("")
-            L.append(f"### 【{g['stage']}】{len(g['items'])} 项")
+            # 节律跟在阶段行尾：业务改了提醒规则，这里就是她核对的地方。
+            # 静默期清单**不在这里出现**（见 _render_muted 的注释）。
+            L.append(f"### 【{g['stage']}】{len(g['items'])} 项"
+                     + (f" · {g['cadence']}" if g["cadence"] else ""))
             for i, it in enumerate(g["items"]):
                 if g["cut"] is not None and i == g["cut"]:
                     L.append(f"------- {g['hint_text']} -------")
