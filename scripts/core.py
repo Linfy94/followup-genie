@@ -320,6 +320,13 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
             else:
                 seen_ids[lid] = i + 1
             errs.extend(_validate_source_fields(l, i + 1))
+            # scope_filters 走的是同一个 match_condition，因此同一批写法在这里
+            # 也会静默失效 —— 而且后果更大：`in` 缺 values 恒假会把**整张台账**
+            # 过滤光，表现只是「今天没有要催的」。运行时虽有「整表被过滤光」的
+            # 告警兜底，但那要等到次日 9:00；能离线查出来就不该留到线上。
+            errs.extend(condition_errors(
+                l.get("scope_filters"),
+                f"台账「{l.get('name') or l.get('id') or i + 1}」的 scope_filters"))
 
         # cross_ledger 的引用必须指向真实存在的台账。指错了只有跑到那个节点
         # 才炸，而那可能是几天后的事；能离线查出来就不该留到线上。
@@ -371,8 +378,29 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
                 #    `doctor --validate-config` 对着一个会炸的配置报「全部通过」。
                 #    repeat 不是对象时也要走进去 —— 它自己会报「必须是对象」，
                 #    在这里先按类型筛掉等于把最常见的手滑放行到运行时。
-                if n.get("enabled"):
+                # 🔴 `enabled` 必须是真布尔。字符串 "false" 是真值 ——
+                #    想停用却写成 "false" 会把节点静默开着，
+                #    而配置读起来完全像是已经停用了。
+                en = n.get("enabled")
+                if en is not None and not isinstance(en, bool):
+                    errs.append(
+                        f"{where}的 enabled 必须是 true 或 false（不带引号），"
+                        f"实际是 {en!r}。"
+                        f"（字符串 \"false\" 在程序里是**真**，会把这个节点静默开着）")
+                if n.get("enabled") is True:
                     errs.extend(repeat_errors(n.get("repeat"), where))
+                    # 启用的节点必须有非空 when：判定用的是
+                    # `conds and all(...)`，空数组会让这一条恒假、节点永不命中。
+                    # 「不设条件就匹配所有行」听起来合理，但实现不是那样，
+                    # 而两者的区别不会报错，只表现为这个节点从不产生催办。
+                    conds = n.get("when")
+                    if not conds:
+                        errs.append(
+                            f"{where}已启用但没有 when 条件。"
+                            f"空条件不等于「匹配所有行」——它恒假，"
+                            f"这个节点永远不会命中，也不会有任何报错。"
+                            f"若本意是停用，请写 enabled: false")
+                    errs.extend(condition_errors(conds, where))
                 thr = n.get("threshold")
                 if thr is None:
                     continue          # 未启用的节点可以没有阈值，doctor 另有检查
@@ -1089,13 +1117,24 @@ class WorkdayCalc:
 
 
 # ── 条件匹配 ──────────────────────────────────────────────────────────
+#
+# op 按「要带哪个取值字段」分三组。分组不只是为了好看：离线校验靠它判断
+# 一个条件是不是缺了取值，而**缺取值恰恰是不报错的那一类**（见
+# condition_errors 的注释）。新增 op 时只改这三个常量，
+# match_condition 与离线校验会一起跟上 —— 这是「同一件事不写两份」（已中三次）。
+
+VALUE_OPS = frozenset({"equals", "not_equals", "contains", "not_contains"})
+VALUES_OPS = frozenset({"in", "not_in"})
+NOARG_OPS = frozenset({"empty", "not_empty"})
+CONDITION_OPS = VALUE_OPS | VALUES_OPS | NOARG_OPS
+
 
 def match_condition(get_text, cond: dict) -> bool:
     """
     对一行数据求一个条件的真假。
 
-    支持的 op：in / not_in / equals / not_equals / empty / not_empty /
-             contains / not_contains
+    支持的 op 见 CONDITION_OPS：in / not_in / equals / not_equals /
+             empty / not_empty / contains / not_contains
     """
     field = cond.get("field")
     op = cond.get("op", "equals")
@@ -1120,7 +1159,81 @@ def match_condition(get_text, cond: dict) -> bool:
         # 「项目状态」把停滞天数拼进字符串里）——没法用 in/equals 枚举，
         # 只能按子串判断，而"未包含某关键词"没法用现有 op 表达。
         return cond.get("value", "") not in val
-    raise LedgerError(f"配置里出现不支持的 op：{op!r}（字段 {field!r}）")
+    raise LedgerError(f"配置里出现不支持的 op：{op!r}（字段 {field!r}）。"
+                      f"支持的是：{'/'.join(sorted(CONDITION_OPS))}")
+
+
+def condition_errors(conds, where: str) -> list[str]:
+    """
+    离线校验一组 when / scope_filters 条件。返回人话错误列表（空 = 通过）。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 这里挡的四类写法**全都能过 JSON 语法、也全都不报错**，
+       只是让那个节点从此不再产生催办 —— 与 rc9 修的 `{"days": -3}` 同一类：
+       配置看起来是配过的，实际已经失效。
+
+         {"op": "in"} 漏写 values      → `val in []` **恒假**，该节点永不命中
+         {"op": "contains"} 漏写 value → `"" in val` **恒真**，该节点吞掉所有
+                                          项目，后面的节点全部轮空
+         条件缺 field                   → 取值恒为空串，判据静默失效
+         op 写错（contain / eq）        → 运行时抛错退出 1。可见，
+                                          但要等到次日 9:00 才知道
+
+       前两类最狠：一条错误日志都不会有，业务只是再也收不到那条提醒。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    errs: list[str] = []
+    if conds is None:
+        return errs
+    if not isinstance(conds, list):
+        return [f"{where}的条件必须是数组，实际是{_type_name(conds)}"]
+
+    for i, c in enumerate(conds):
+        at = f"{where}的第 {i + 1} 个条件"
+        if not isinstance(c, dict):
+            errs.append(f"{at}必须是对象，实际是{_type_name(c)}")
+            continue
+
+        op = c.get("op", "equals")
+        if op not in CONDITION_OPS:
+            errs.append(f"{at}的 op={op!r} 不支持，只能是："
+                        f"{'/'.join(sorted(CONDITION_OPS))}")
+            continue          # op 不认识就没法再判它该带哪个取值字段
+
+        field = c.get("field")
+        if not isinstance(field, str) or not field.strip():
+            errs.append(f"{at}缺少 field（要判断台账里的哪一列）。"
+                        f"缺了不会报错，只会让这一列恒为空串、判据静默失效")
+
+        if op in VALUES_OPS:
+            vs = c.get("values")
+            if not isinstance(vs, list) or not vs or \
+                    not all(isinstance(v, str) for v in vs):
+                errs.append(
+                    f"{at}的 op={op!r} 必须配一个非空的 values 字符串数组，"
+                    f"实际是 {vs!r}。"
+                    f"（空的话 `取值 in []` **恒假**，这个条件永远不成立："
+                    f"写在节点上是从此一条都不催，写在 scope_filters 上是"
+                    f"整张台账被过滤光。两种都不会有任何报错）")
+        elif op in VALUE_OPS:
+            if "value" not in c:
+                errs.append(
+                    f"{at}的 op={op!r} 必须配 value。"
+                    f"（缺了会当成空串：contains 恒真——这个节点会吞掉所有项目、"
+                    f"让后面的节点全部轮空；equals 则只匹配空单元格）")
+            elif not isinstance(c["value"], str):
+                errs.append(f"{at}的 value 必须是字符串，"
+                            f"实际是{_type_name(c['value'])}"
+                            f"（台账取值一律按文本比对，数字 7 与文本「7」不相等）")
+        else:                 # NOARG_OPS
+            extra = [k for k in ("value", "values") if k in c]
+            if extra:
+                errs.append(
+                    f"{at}的 op={op!r} 只判空不空，多写的 {'/'.join(extra)} "
+                    f"不会被读取。若本意是「等于某值」请改 op，"
+                    f"否则删掉以免下次误读")
+
+    return errs
 
 
 def referenced_fields(conds: list[dict]) -> set[str]:

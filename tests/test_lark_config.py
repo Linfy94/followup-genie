@@ -150,8 +150,12 @@ class DuplicateLedgerIdTest(unittest.TestCase):
 class CrossLedgerRefTest(unittest.TestCase):
 
     def rules(self, cross):
+        # when 不能省：启用的节点空条件恒假、永远不命中，离线校验会拦
+        # （见 test_condition_malformed）。这里只是要一个形状真实的节点，
+        # 好让 cross_ledger 的校验有东西可挂。
         return {"rulesets": {"rs": {"nodes": [
             {"id": "reg", "name": "③分行扫码登记", "enabled": True,
+             "when": [{"field": "安装情况", "op": "empty"}],
              "threshold": {"days": 3}, "repeat": {"days": 1},
              "cross_ledger": cross},
         ]}}}
