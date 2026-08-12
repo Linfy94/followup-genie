@@ -410,7 +410,8 @@ def _problems(rep: core.Report) -> list[str]:
 
 def render(reports: list[core.Report], today: date, write_on: bool,
            output_cfg: dict, verbose: bool = False,
-           run_warnings: list[str] | None = None) -> str:
+           run_warnings: list[str] | None = None,
+           run_notices: list[str] | None = None) -> str:
     """
     终端 / hermes 日志用的纯文本渲染。演示走的就是这一份，所以它和企微那份
     保持同一结构（升序、编号、分割线位置），只在标记上不同。
@@ -423,6 +424,10 @@ def render(reports: list[core.Report], today: date, write_on: bool,
 
     for w in (run_warnings or []):
         lines.append(f"⚠️ {w}")
+    # 提示与警告分开显示：警告是「这次跑出问题了」，提示是「有件事等你处理」。
+    # 混在一起会让业务把「需求文档变了」当成程序故障。
+    for n in (run_notices or []):
+        lines.append(f"📌 {n}")
 
     for section in merge_reports(reports):
         groups = group_items(section.items, output_cfg)
@@ -519,7 +524,8 @@ def _render_report_tail(lines: list[str], rep: core.Report,
 
 
 def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
-                 run_warnings: list[str] | None = None) -> str:
+                 run_warnings: list[str] | None = None,
+                 run_notices: list[str] | None = None) -> str:
     """
     企微专用渲染（markdown_v2）。
 
@@ -547,6 +553,9 @@ def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
     for w in (run_warnings or []):
         L.append("")
         L.append(f"⚠️ {w}")
+    for n in (run_notices or []):
+        L.append("")
+        L.append(f"📌 {n}")
 
     for section in merge_reports(reports):
         groups = group_items(section.items, output_cfg)
@@ -598,6 +607,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--today", metavar="YYYY-MM-DD",
                     help="把「今天」当作指定日期（回归测试与复现问题用）。"
                          "默认不发不写，是纯模拟")
+    ap.add_argument("--ack-spec", action="store_true",
+                    help="需求文档核对完了：把当前状态记成新基线，消除变更提示")
     ap.add_argument("--force-push", action="store_true",
                     help="配合 --today 时仍然真发企微并写状态（补跑用）。"
                          "日常不要加——回归测试误发到业务群是不可逆的")
@@ -635,6 +646,17 @@ def main(argv: list[str] | None = None) -> int:
     if cfg_errs:
         return fail("配置校验", "\n".join(f"· {e}" for e in cfg_errs),
                     output_cfg, code=2, real_run=real_run)
+
+    # --ack-spec 只更新需求文档基线，不做催办、不发消息、不碰台账。
+    # 它要写状态，所以必须走在只读闸门开着的路径上 ——
+    # 与 --dry-run / --json 同时给等于自相矛盾，直接拒绝，不静默地什么也不做。
+    if args.ack_spec:
+        if not real_run:
+            print("❌ --ack-spec 要更新基线（写状态），不能和 "
+                  "--dry-run / --json / 不带 --force-push 的 --today 一起用。",
+                  file=sys.stderr)
+            return 2
+        return _ack_spec_docs(rules_cfg)
 
     if args.today:
         try:
@@ -717,6 +739,61 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if lock_path:
             core.release_lock(lock_path, lock_token)
+
+
+def _check_spec_docs(rules_cfg: dict, real_run: bool) -> list[str]:
+    """
+    需求文档变没变。返回给业务看的提示（可能是空的）。
+
+    🔴 返回值**绝不能进 run_warnings**：`exit_code == 0 and not run_warnings`
+       才写 last_full_success，而看门狗靠它判断「任务有没有跑」。塞进去会让
+       文档变更未确认的每一天都少一次成功记录，两天后看门狗误报「任务根本
+       没跑」—— 修好一个静默，换来一个假警报。节假日闸门当初踩的就是这个坑。
+
+    🔴 也绝不能影响退出码。需求文档跟催办判定毫无关系，读不到它不该让当天
+       的催办算失败；但读不到要说出来，否则「文档没变」和「没查成」
+       在输出上长得一模一样。
+    """
+    entries = rules_cfg.get("spec_watch") or []
+    if not entries:
+        return []
+    notices, new_baseline = core.spec_watch_scan(
+        entries, core.spec_watch_baseline(), qqdoc.file_fingerprint)
+    # 首次见到某份文档时要把基线落盘。write_state 自己带只读闸门，
+    # 诊断模式下这一步会被挡掉 —— 那时不落盘也不提示，下次真实运行再记。
+    if real_run:
+        core.write_state(core.SPEC_WATCH_FILE, new_baseline)
+    return notices
+
+
+def _ack_spec_docs(rules_cfg: dict) -> int:
+    """`--ack-spec`：人工核对完了，把当前状态记成新基线。"""
+    entries = rules_cfg.get("spec_watch") or []
+    if not entries:
+        print("配置里没有 spec_watch，没有需要确认的需求文档。")
+        return 0
+    baseline = core.spec_watch_baseline()
+    updated, failed = [], []
+    for e in entries:
+        fid, name = e.get("file_id"), e.get("name") or e.get("file_id")
+        try:
+            fp = qqdoc.file_fingerprint(fid)
+        except Exception as ex:            # noqa: BLE001
+            failed.append(f"《{name}》：{type(ex).__name__}: {ex}")
+            continue
+        baseline[fid] = {k: fp.get(k) for k in core._FP_KEYS}
+        updated.append(f"《{name}》→ {fp.get('last_modify_name')} "
+                       f"{core._fmt_modify_time(fp.get('last_modify_time'))}")
+    if updated:
+        core.write_state(core.SPEC_WATCH_FILE, baseline)
+        print("✅ 已确认，基线更新为：")
+        for u in updated:
+            print(f"   {u}")
+    for f in failed:
+        # 🔴 取不到指纹的那几份**不更新基线**：记一个取不到的值等于把提示
+        #    永久消音，而它本该继续提醒。
+        print(f"🔴 这份没能确认，提示会继续出现：{f}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
@@ -819,6 +896,10 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
     if real_run:
         _watch_scope_emptied(reports, output_cfg)
 
+    # 需求文档变没变。放在台账读完之后：它跟催办判定无关，绝不能因为它
+    # 拖慢或拖垮取数；它自己的失败也只出提示，不进 run_warnings、不改退出码。
+    run_notices = _check_spec_docs(rules_cfg, real_run)
+
     total_due = sum(len(r.due) for r in reports)
     read_count = sum(r.total_rows for r in reports)
     muted_count = sum(len(r.overdue_muted) for r in reports)
@@ -843,15 +924,15 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
 
     # ── 输出 ──
     if args.json:
-        _print_json(reports, today, write_on, failures)
-    elif args.verbose or total_due or failures or run_warnings or any(
-        r.warnings or r.accounted != r.total_rows for r in reports
-    ):
+        _print_json(reports, today, write_on, failures, run_notices)
+    elif args.verbose or total_due or failures or run_warnings or run_notices \
+            or any(r.warnings or r.accounted != r.total_rows for r in reports):
         # 有待催、有故障、有数据质量问题时都要输出。
         # 只有「一切正常且今天没有超时单」才完全静默 —— 但 --verbose 是
         # 诊断开关，它下面的静默毫无用处（排查时最想看的正是「今天为什么没有」）。
         text = render(reports, today, write_on, output_cfg,
-                      verbose=args.verbose, run_warnings=run_warnings)
+                      verbose=args.verbose, run_warnings=run_warnings,
+                      run_notices=run_notices)
         if real_run:
             # 清单末尾补一行投递结果：清单本身不能证明它发出去了。
             text = f"{text}\n投递：{delivery['summary']}"
@@ -1039,12 +1120,13 @@ def _deliver(args, reports, today, output_cfg, primary, total_due, real_run,
                    "summary": f"企微{head} {res.sent}/{res.total} 条"}
 
 
-def _print_json(reports, today, write_on, failures) -> None:
+def _print_json(reports, today, write_on, failures, notices=None) -> None:
     import json as _json
     payload = {
         "date": today.isoformat(),
         "reminders_write": write_on,
         "failures": failures,
+        "spec_notices": list(notices or []),
         "ledgers": [
             {
                 "id": r.ledger_id, "name": r.ledger_name, "line": r.line,

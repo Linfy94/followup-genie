@@ -337,6 +337,7 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
             errs.extend(_validate_cross_refs(l, rules, known))
 
     # ── rules.json ──
+    errs.extend(spec_watch_errors(rules))
     rs = rules.get("rulesets")
     if rs is None:
         errs.append("rules.json 缺少顶层字段 rulesets")
@@ -630,6 +631,123 @@ def update_health(**fields) -> None:
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+# ── 需求文档变更探测 ──────────────────────────────────────────────────
+#
+# 业务每天推送前会对着《跟进精灵需求文档》人工核一遍「逻辑有没有变」。
+# 这一段把「有没有变」自动化 —— **只回答变没变，不回答变了什么**。
+# 价值在于：文档没变的那些天，那次人工核对完全可以不做。
+#
+# 🔴 它替代不了「读懂改了什么」。rc8 那次（哨兵④发货节律从每周三改成
+#    每周一/周四，配置没跟上，业务周一来问「怎么不提醒」）真正花时间的是
+#    读懂，但**代价全在没发现** —— 已经晚了几周。这一段解决的正是那一半。
+#
+# 取指纹用的是 manage.query_file_info，**本来就在只读白名单里**
+# （只读性核对一直在用它）。所以这件事零新增能力、零 token、零新白名单项。
+
+SPEC_WATCH_FILE = "spec_watch.json"
+
+# 指纹里参与比对的字段。title 也算：文档被改名同样值得看一眼。
+_FP_KEYS = ("title", "last_modify_name", "last_modify_time")
+
+
+def spec_watch_errors(rules: dict) -> list[str]:
+    """离线校验 rules.json 的 spec_watch 段。返回人话错误列表。"""
+    entries = rules.get("spec_watch")
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        return [f"rules.json 的 spec_watch 应该是数组，实际是{_type_name(entries)}"]
+    errs: list[str] = []
+    for i, e in enumerate(entries):
+        at = f"rules.json 的第 {i + 1} 份 spec_watch"
+        if not isinstance(e, dict):
+            errs.append(f"{at}应该是对象，实际是{_type_name(e)}")
+            continue
+        fid = e.get("file_id")
+        if not isinstance(fid, str) or not fid.strip():
+            errs.append(f"{at}缺少 file_id"
+                        f"（腾讯文档链接 docs.qq.com/doc/<这一段>）")
+        if not e.get("name"):
+            errs.append(f"{at}缺少 name —— 提示里要说清是哪份文档被改了")
+    return errs
+
+
+def _fingerprint_of(record) -> tuple:
+    if not isinstance(record, dict):
+        return ()
+    return tuple(record.get(k) for k in _FP_KEYS)
+
+
+def spec_watch_scan(entries: list, baseline: dict, fetch) -> tuple[list, dict]:
+    """
+    比对每份需求文档的指纹。返回（提示列表, 要写回的基线）。
+
+    `fetch(file_id) -> dict` 注入进来，测试不必联网。
+
+    ═══════════════════════════════════════════════════════════════════
+    三条刻意的设计：
+
+    1. **首次没有基线时只记录，不提示。** 一上来就报一条谁也没法处理的
+       警报，只会教人忽略它。
+
+    2. **变更提示持续到人工确认为止，不是只响一天。** 基线只有
+       `--ack-spec` 才更新。这跟业务口径②「存量不静音」是同一条路子：
+       噪声由清账消化，不由系统静音消化。只响一天的提示 == 那天没看到
+       就永久错过，正好回到这个项目一路在消灭的形状。
+
+    3. **取指纹失败也出提示，但不改基线、不影响退出码。** 需求文档读不到
+       不该让当天的催办失败（它跟催办判定毫无关系），但也不许静默 ——
+       否则「文档一直没变」和「一直没查成」在输出上长得一模一样。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    notices: list[str] = []
+    new_baseline = dict(baseline or {})
+
+    for e in entries or []:
+        fid, name = e.get("file_id"), e.get("name") or e.get("file_id")
+        try:
+            now = fetch(fid)
+        except Exception as ex:            # noqa: BLE001 —— 什么原因都要说出来
+            notices.append(
+                f"需求文档《{name}》这次没核对成：{type(ex).__name__}: {ex}。"
+                f"这**不是**「文档没变」，是没查成。")
+            continue
+
+        old = new_baseline.get(fid)
+        if old is None:
+            # 首次见到：静静记下当前状态当基线。
+            new_baseline[fid] = {k: now.get(k) for k in _FP_KEYS}
+            continue
+
+        if _fingerprint_of(old) == _fingerprint_of(now):
+            continue
+
+        who = now.get("last_modify_name") or "未知"
+        when = _fmt_modify_time(now.get("last_modify_time"))
+        since = _fmt_modify_time(old.get("last_modify_time"))
+        notices.append(
+            f"需求文档《{name}》被「{who}」改过了（{when}，上次核对时是 {since}）。"
+            f"催办规则可能要跟着改 —— 核对完跑一次 "
+            f"`check_followup.py --ack-spec` 消除这条提示。"
+            f"（只说变没变，变了什么要人自己读）")
+
+    return notices, new_baseline
+
+
+def _fmt_modify_time(v) -> str:
+    """腾讯返回的是毫秒时间戳字符串。转不出来就原样给，别为格式化炸掉。"""
+    try:
+        return datetime.fromtimestamp(int(v) / 1000).astimezone() \
+            .strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return str(v)
+
+
+def spec_watch_baseline() -> dict:
+    b = read_state(SPEC_WATCH_FILE)
+    return b if isinstance(b, dict) else {}
 
 
 # ── 运行锁 ────────────────────────────────────────────────────────────

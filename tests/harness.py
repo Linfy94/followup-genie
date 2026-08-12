@@ -279,7 +279,8 @@ class Run:
 
 
 def run_main(argv, sheet, *, post_results=None, alert_ok=True,
-             hermes_found=True, read_sheet_error=None, push_raises=None):
+             hermes_found=True, read_sheet_error=None, push_raises=None,
+             fingerprints=None):
     """
     跑一次主脚本。
 
@@ -317,6 +318,24 @@ def run_main(argv, sheet, *, post_results=None, alert_ok=True,
     def fake_push(*a, **kw):
         raise push_raises
 
+    def fake_fingerprint(fid):
+        """
+        只读性核对与需求文档变更探测共用同一个 manage.query_file_info。
+
+        缺省给一个固定值（只读性核对只关心「两次一样」）。需求文档那组要按
+        file_id 分别给值，所以 fingerprints 可以是 {file_id: 指纹或异常}
+        或一个可调用对象。异常实例会被抛出 —— 「读不到」是必须能造出来的场景。
+        """
+        if fingerprints is None:
+            return {"last_modify_time": 1, "last_modify_name": "x"}
+        got = fingerprints(fid) if callable(fingerprints) \
+            else fingerprints.get(fid)
+        if isinstance(got, Exception):
+            raise got
+        if got is None:
+            raise AssertionError(f"测试没给 file_id={fid!r} 准备指纹")
+        return got
+
     out, err = io.StringIO(), io.StringIO()
     patches = [
         # 真实的群机器人限速是每分钟 20 条，所以每片之间 sleep 1 秒。
@@ -327,8 +346,7 @@ def run_main(argv, sheet, *, post_results=None, alert_ok=True,
         mock.patch.object(check_followup, "_hermes_bin",
                           lambda: "/fake/hermes" if hermes_found else None),
         mock.patch.object(check_followup.subprocess, "run", fake_subprocess_run),
-        mock.patch.object(qqdoc, "file_fingerprint",
-                          lambda fid: {"last_modify_time": 1, "last_modify_name": "x"}),
+        mock.patch.object(qqdoc, "file_fingerprint", fake_fingerprint),
         contextlib.redirect_stdout(out),
         contextlib.redirect_stderr(err),
     ]
