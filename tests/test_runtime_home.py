@@ -101,3 +101,24 @@ class EndToEndTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessLeavesTheGateClosedTest(unittest.TestCase):
+    """
+    🔴 `temp_home` 出块后必须把只读闸门**开着**。
+
+    出块的那一刻 HERMES_HOME 已经还原成真实运行时目录。留一个可写的 core，
+    等于给「测试代码不小心在块外写状态」留了一条直通生产状态目录的路。
+    2026-08-12 真踩了：一条只读探针写在块外，`{"x": 1}` 落进了
+    ~/.hermes/followup/state/。文件是惰性的、没损坏任何东西，
+    但下一次可能就不是。
+    """
+
+    def test_write_after_the_block_is_blocked(self):
+        from harness import temp_home
+        with temp_home():
+            pass
+        core.BLOCKED_WRITES.clear()
+        core.write_state("绝不该落地.json", {"x": 1})
+        self.assertTrue(core.BLOCKED_WRITES,
+                        "出块后闸门没开，块外的写会打进真实 state/")

@@ -242,7 +242,14 @@ def temp_home(*, ledgers=None, rules=None, output=None, holidays=None,
         finally:
             core.STATE_DAMAGE.clear()
             core.BLOCKED_WRITES.clear()
-            core.set_read_only(False)
+            # 🔴 出了这个块就把只读闸门**开上**，不是关上。
+            #
+            # 出块的那一刻 HERMES_HOME 已经还原成**真实**运行时目录了。
+            # 这里留一个可写的 core，等于给「测试代码不小心在块外写状态」
+            # 留了一条直通生产状态目录的路 —— 2026-08-12 真踩了：
+            # 一条只读探针写在块外，`{"x": 1}` 落进了 ~/.hermes/followup/state/。
+            # 进块时本来就会重新 set_read_only(False)，所以这里开着不影响任何用例。
+            core.set_read_only(True)
             if old is None:
                 os.environ.pop("HERMES_HOME", None)
             else:
