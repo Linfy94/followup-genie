@@ -175,6 +175,33 @@ class ErrcodeTest(Base):
                 with self.assertRaises(LedgerError):
                     self._read({"errcode": code, "errmsg": "boom"})
 
+    def test_851003_explains_robot_object_permission(self):
+        with self.assertRaises(LedgerError) as cm:
+            self._read({"errcode": 851003, "errmsg": "no authority"})
+        msg = str(cm.exception)
+        self.assertIn("对象权限", msg)
+        self.assertIn("不会继承业务人员", msg)
+        self.assertIn("重新扫码", msg)
+
+    def test_851002_explains_link_or_document_type(self):
+        with self.assertRaises(LedgerError) as cm:
+            self._read({"errcode": 851002, "errmsg": "unsupported"})
+        msg = str(cm.exception)
+        self.assertIn("链接或文档类型不兼容", msg)
+        self.assertIn("完整 URL", msg)
+        self.assertNotIn("sheet_id", msg)
+
+    def test_851002_from_content_does_not_blame_sheet_id(self):
+        calls, fake = run_with([{"errcode": 851002, "errmsg": "unsupported"}])
+        with mock.patch.object(wecom_doc, "wecom_cli_bin", return_value=EXE), \
+             mock.patch.object(wecom_doc.subprocess, "run", fake):
+            with self.assertRaises(LedgerError) as cm:
+                wecom_doc.doc_content("https://doc.weixin.qq.com/sheet/x")
+        msg = str(cm.exception)
+        self.assertIn("正文读取接口不兼容", msg)
+        self.assertIn("不要修改 sheet_id", msg)
+        self.assertNotIn("重新核对 sheet_id", msg)
+
     def test_errcode_zero_passes(self):
         self.assertEqual(self._read(INFO)["name"], "某需求记录")
 

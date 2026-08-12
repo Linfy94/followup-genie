@@ -12,13 +12,14 @@
 
       "source": "tencent_mcp",
       "_source说明": [
-        "支持两种数据源，写错会直接报错、不会静默跑空：",
+        "支持三种数据源，写错会直接报错、不会静默跑空：",
         "  tencent_mcp —— 腾讯文档。需要 file_id + sheet_id，凭证是 .env 的 TENCENT_DOCS_TOKEN。什么都不用装。",
         "  lark_cli    —— 飞书多维表格。需要 base_token + table_id + profile，",
         "                 靠外部的 lark-cli 命令行工具读（安装与四层授权见 docs/飞书多维表格接入.md）。",
         "                 完整字段见本文件末尾那个「示例飞书台账」。",
-        "两种可以混用，一份配置里既有腾讯文档台账也有飞书台账是正常的；",
-        "只用其中一种时，另一种的凭证不需要配，自检也不会要求你配。"
+        "  wecom_doc   —— 企业微信在线表格。需要 url + sheet_id，靠 wecom-cli 的智能机器人读取（见 docs/企业微信文档接入.md）。",
+        "                 它不是推送消息用的群机器人 Webhook；完整字段见本文件末尾「示例企业微信文档台账」。",
+        "三种可以混用；只用其中一种时，另外两种的凭证不需要配，自检也不会要求你配。"
       ],
       "file_id": "从腾讯文档链接里取：docs.qq.com/sheet/【这一段】",
       "sheet_id": "子表 ID，链接里 ?tab= 后面那段；不确定就先随便填，报错信息会列出所有子表",
@@ -165,6 +166,33 @@
       "known_values": {},
       "terminal_states": [],
       "manual_terminal": [],
+      "terminal_note_exceptions": [],
+      "paused": [],
+      "gray_list_for_review": []
+    },
+
+    {
+      "id": "示例企业微信文档台账",
+      "_这一条是干什么的": [
+        "数据源在企业微信在线表格时的完整字段示例。先按 docs/企业微信文档接入.md 完成智能机器人初始化、能力授权和文档对象权限。",
+        "url 与 sheet_id 必须成对填写：两个不同文档可能都有同名 sheet_id，不能只填其中一个。",
+        "群机器人 Webhook 只负责消息推送，不能填写在这里，也不能用来读台账。"
+      ],
+      "name": "企业微信在线表格的名字",
+      "line": "业务线名字",
+      "enabled": false,
+
+      "source": "wecom_doc",
+      "url": "从 doc.weixin.qq.com/sheet/ 或 doc.weixin.qq.com/smartsheet/ 的完整访问链接复制；不要删掉链接参数",
+      "sheet_id": "子表 ID；先用企业微信文档接入说明里的只读探针列出真实子表后填写",
+
+      "ruleset": "示例规则集",
+      "key_field": "项目编号",
+      "name_field": "项目名称",
+      "required_columns": ["项目编号", "项目名称"],
+      "scope_filters": [],
+      "known_values": {},
+      "terminal_states": [],
       "terminal_note_exceptions": [],
       "paused": [],
       "gray_list_for_review": []

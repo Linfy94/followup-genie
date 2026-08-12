@@ -1,17 +1,17 @@
 # 项目跟进精灵 🧚
 
-> `0.5.0-rc1` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
+> `0.5.0-rc3` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
 
 ## 给业务：只复制下面这一段
 
-> 请帮我安装并启用“项目跟进精灵”。请从 `https://github.com/Linfy94/followup-genie/releases/latest/download/followup-genie-agent.zip` 下载安装包，同时下载同目录的 `SHA256SUMS.txt` 并核对文件完整性；校验失败立即停止。解压后完整阅读包内的 `SKILL.md` 和 `README.md`，判断你当前运行在 WorkBuddy 还是 Hermes，然后使用包内 `scripts/bootstrap.py` 完成对应安装。所有技术操作由你完成，不要让我运行命令、编辑文件或理解 Git；使用独立运行目录，腾讯文档台账永远只读，不覆盖已有配置、状态或凭证。安装后只执行离线配置检查，明确告诉我安装路径、版本和检查结果，然后一次只问我一个业务问题，引导我接入测试台账；在我明确回复“确认通过”前，不得读取正式台账、真实发送消息、写提醒事项或创建自动化。遇到下载、权限、校验或安装错误时立即停止，不猜测、不绕过，并用业务语言告诉我需要确认什么。
+> 请帮我安装并启用“项目跟进精灵”。请从 `https://github.com/Linfy94/followup-genie/releases/latest/download/followup-genie-agent.zip` 下载安装包，同时下载同目录的 `SHA256SUMS.txt` 并核对文件完整性；校验失败立即停止。解压后完整阅读包内的 `SKILL.md` 和 `README.md`，判断你当前运行在 WorkBuddy 还是 Hermes，然后使用包内 `scripts/bootstrap.py` 完成对应安装。所有技术操作由你完成，不要让我运行命令、编辑文件或理解 Git；使用独立运行目录，所有台账源只读且永远不修改，不覆盖已有配置、状态或凭证。安装后只执行离线配置检查，明确告诉我安装路径、版本和检查结果，然后一次只问我一个业务问题，引导我接入测试台账；在我明确回复“确认通过”前，不得读取正式台账、真实发送消息、写提醒事项或创建自动化。遇到下载、权限、校验或安装错误时立即停止，不猜测、不绕过，并用业务语言告诉我需要确认什么。
 
 这段指令会把程序安装到当前工作空间并立即可用，不承诺自动出现在 WorkBuddy 的“已安装技能”列表。若要显示在技能列表，使用同一 Release 中的 `.skill` 文件手动上传。
 
 读业务维护的项目台账，找出**在某个流程节点上卡太久**的项目，生成待催清单推给业务本人。
 
 纯规则判定，零 LLM、零 token、零第三方 Python 依赖。台账**只读**。
-（接飞书多维表格时需要外部的 lark-cli 命令行工具，接腾讯文档则什么都不用装。）
+（腾讯文档不需要额外命令行工具；企业微信文档和飞书多维表格各需要自己的命令行工具与授权，不能混用。）
 
 ```
 🧚 项目跟进精灵 · 2026-08-07
@@ -52,9 +52,9 @@
 |---|---|
 | Python | **3.9+**（macOS 自带的 3.9 就够，无需另装） |
 | 第三方 Python 包 | **无**。只用标准库 |
-| 外部命令行工具 | **只有接飞书多维表格时才需要** —— 见下方「按数据源看依赖」 |
+| 外部命令行工具 | 只接腾讯文档不需要；企业微信文档或飞书多维表格分别需要对应工具 —— 见下方「按数据源看依赖」 |
 | 操作系统 | macOS / Linux。**Windows 尚未验证** |
-| 外网 | 腾讯文档台账需 `docs.qq.com`；飞书台账需 `feishu.cn`；推企微则加 `qyapi.weixin.qq.com`。都是国内域名 |
+| 外网 | 腾讯文档需 `docs.qq.com`；企业微信文档需 `doc.weixin.qq.com`、`qyapi.weixin.qq.com`；飞书需 `feishu.cn`；企微推送也需 `qyapi.weixin.qq.com`。都是国内域名 |
 | 模型 API key | **不需要**。主流程是纯规则 |
 
 ### 按数据源看依赖
@@ -64,12 +64,22 @@
 | 你的台账在 | 需要装 | 需要的凭证 |
 |---|---|---|
 | 腾讯文档 | **什么都不用装** | `.env` 里的 `TENCENT_DOCS_TOKEN`（扫码获取） |
+| 企业微信文档 | **Node.js 18+** + **wecom-cli** | 智能机器人初始化、文档能力及目标文档对象权限，**不是群机器人 Webhook** |
 | 飞书多维表格 | **Node.js** + **lark-cli** | 命名 profile + Base 只读授权 + 同一用户的文档协作者权限，**不需要腾讯文档凭证** |
 
 ```bash
 # 只有接飞书才需要安装；授权不能只跑一句无 profile 的 auth login
 npm install -g @larksuiteoapi/lark-cli
+
+# 只有接企业微信文档才需要安装；随后按独立接入说明初始化智能机器人
+npm install -g @wecom/cli
 ```
+
+腾讯文档完整执行 [`docs/腾讯文档接入.md`](docs/腾讯文档接入.md)：Token 不是浏览器登录态，
+必须由能打开目标台账的同一账号扫码取得。
+
+企业微信文档完整执行 [`docs/企业微信文档接入.md`](docs/企业微信文档接入.md)：读表走
+智能机器人；消息推送走群机器人 Webhook，两者是两条独立通道。
 
 安装后完整执行 [`docs/飞书多维表格接入.md`](docs/飞书多维表格接入.md)。
 飞书读取有四道门：应用 profile、API scope、同一 profile 的用户登录、目标文档协作者。
@@ -81,7 +91,7 @@ API 能读取；应向作者索取原始 `/base/...` 链接或真实 `base_token
 🔴 **程序绝不会替你自动安装 lark-cli。** 找不到它时会停下来、把安装命令、
 接入文档路径和已经找过哪些目录一起打出来，然后退出——装什么到这台电脑上该由人决定。
 
-🔴 **纯飞书用户不需要腾讯文档凭证。** `doctor` 会先看你启用了哪些台账，
+🔴 **纯飞书或纯企业微信文档用户不需要腾讯文档凭证。** `doctor` 会先看你启用了哪些台账，
 没有腾讯文档台账就不查那个凭证，也不会报红。
 
 ---
@@ -147,15 +157,17 @@ python3 scripts/bootstrap.py --host hermes        # 或者装到 Hermes
 
 1. **配置**：按你的台账改 `followup/config/ledgers.json` 与 `rules.json`
    （详见 [docs/接一条新业务线.md](docs/接一条新业务线.md)）
-2. **凭证**：写进 `<运行时目录>/.env`
+2. **本机连接信息**：按已启用的数据源分别配置。只有下面三个环境变量写进
+   `<运行时目录>/.env`；`wecom-cli`、`lark-cli` 的身份保留在各自凭证存储中，不复制到 `.env`
 
 ```bash
-TENCENT_DOCS_TOKEN=          # 必填。docs.qq.com →「更多操作 → 开放平台」→ 扫码
+TENCENT_DOCS_TOKEN=          # 腾讯文档台账才需要：docs.qq.com →「更多操作 → 开放平台」→「OpenClaw 专用入口」扫码
 FOLLOWUP_WECOM_WEBHOOK=      # 要推企微群才需要。进群聊 → 群设置 → 群机器人 → 添加
 FOLLOWUP_ALERT_TARGET=       # 可选。故障告警发到哪，形如 telegram:<chat_id>
 ```
 
-⚠️ 企微机器人要在**群聊里**建，不是「工作台 → 智能机器人」——后者是要写代码接入的另一种东西。
+⚠️ **下面只说明消息推送通道。** 推送机器人要在**群聊里**建，不是读取企微文档所用的
+「工作台 → 智能机器人」。两者的身份和凭证不能互换。
 拿到的地址形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…`，**它等同于密码**。
 
 ---
@@ -292,7 +304,7 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test       
 ⚠️ `holidays.json` 是全项目唯一需要人工年度维护的东西（国务院调休无法用规则推算）。
 过期时 `doctor` 会报警，**不会静默降级**。
 
-✅ **0.5.0-rc1 首次安装已自带核对过的 2026 年预设**：33 个放假日、6 个补班日，
+✅ **0.5.0-rc3 首次安装已自带核对过的 2026 年预设**：33 个放假日、6 个补班日，
 `covers_year: 2026`、`verified: true`。升级时如已有 `holidays.json`，`setup.sh`
 会跳过并逐字节保留，绝不覆盖业务自己维护的日期。
 
@@ -354,7 +366,7 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 
 ## 已知边界
 
-见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.5.0-rc1` 的主要限制：
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.5.0-rc3` 的主要限制：
 WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**。
 
 ---

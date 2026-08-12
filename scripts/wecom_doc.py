@@ -142,10 +142,33 @@ def _run_cli(subcommand: str, payload: dict) -> dict:
     #    没有答案，这一句就是那个未知数的兜底。
     code = body.get("errcode")
     if code not in (0, None):
+        guidance = {
+            851008: (
+                "这是智能机器人缺「获取成员文档内容」能力授权。"
+                "请由机器人管理员在企业微信「工作台 → 智能机器人」开通该能力；"
+                "不要改用群机器人 Webhook。"
+            ),
+            851003: (
+                "这是机器人对目标文档没有对象权限。10 人以上企业中，机器人是独立身份，"
+                "不会继承业务人员的文档权限。请让文档所有者或企业微信管理员确认能否把"
+                "这份文档显式授权给该智能机器人；重新扫码、换分享链接或给业务人员加协作者都不能替代它。"
+            ),
+        }.get(code, "请保留 errcode 与 errmsg，按 docs/企业微信文档接入.md 的错误对照表处理；不要盲目重新扫码。")
+        if code == 851002:
+            if subcommand == "get_doc_content":
+                guidance = (
+                    "文档结构可读，但正文读取接口不兼容该文档类型。当前适配器无法继续读取；"
+                    "请停止接入并保留错误，不要修改 sheet_id 或反复授权。"
+                )
+            else:
+                guidance = (
+                    "这是链接或文档类型不兼容。请确认 source=wecom_doc 对应企业微信在线表格，"
+                    "并核对完整 URL；此时不要先改权限。"
+                )
         raise LedgerError(
             f"企微文档接口报错（{subcommand}）：errcode={code} "
             f"errmsg={body.get('errmsg')!r}。"
-            f"{'851008 通常是机器人缺「获取成员文档内容」能力授权。' if code == 851008 else ''}"
+            f"{guidance}"
             f"这不是「今天没有要催的」，是读不到数据。"
         )
     return body

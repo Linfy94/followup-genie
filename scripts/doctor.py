@@ -251,8 +251,8 @@ def check_wecom_doc_credential(doc: Doc, ledger: dict) -> bool:
     except LedgerError as e:
         doc.add(BAD, "企业微信文档读取权限不可用", f"{e}\n"
                 "🔴 注意：这会表现成「今天没有超时单」，不是正常状态。\n"
-                "若 errcode 是 851008，去企微「工作台 → 智能机器人」"
-                "给机器人开通「获取成员文档内容」能力（一次开通对全部文档生效）。")
+                "错误详情已按 errcode 给出唯一处理动作：851008 补机器人能力；"
+                "851003 核对机器人对该文档的对象权限；851002 按失败命令核对链接或正文兼容性。")
         return False
     doc.add(OK, "企业微信文档可读", "（内容不打印）")
     return True
