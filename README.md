@@ -385,6 +385,7 @@ WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但
 - [CHANGELOG.md](CHANGELOG.md) — 每次改了什么，尤其是**业务能感知的行为变化**
 - [SECURITY.md](SECURITY.md) — 数据边界与凭证处理
 - [docs/接一条新业务线.md](docs/接一条新业务线.md) — 从台账链接到跑通首次催办
+- [docs/改一个催办节点.md](docs/改一个催办节点.md) — 需求变了怎么改规则（改配置不用发版）
 - [docs/业务安装与验收.md](docs/业务安装与验收.md) — 业务侧的验收标准
 - [docs/业务操作手册-零基础版.md](docs/业务操作手册-零基础版.md) — 给零基础业务的完整手册
 

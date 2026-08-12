@@ -99,6 +99,16 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/check_followup.py --verify-rea
 `templates/presets/ai-box-sentinel/` 的脱敏预设开始；一次只问业务一个问题，
 不猜台账地址、字段或责任范围。跨台账匹配的归一规则必须写在配置中，不写死在代码里。
 
+## 需求变了、要改催办节点
+
+见 `docs/改一个催办节点.md`。要点：节点是配置，改 `rules.json` 不用改代码、
+不用发版、不用部署，次日 9:00 生效。三条命令保平安 ——
+改触发条件前 `doctor.py --values <台账id>` 看真实取值（照抄业务口头说的会一条都
+匹配不上），改完 `doctor.py --validate-config`，提交前
+`diff_due.py 改前.json 改后.json` 逐条比对待催名单。
+🔴 节点顺序有语义：判定取「第一个 when 全部满足的启用节点」；停用用
+`enabled: false`，不删。
+
 ## 目录约定（升级安全）
 
 | 位置 | 内容 | 升级 Skill 时 |
