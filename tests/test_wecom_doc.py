@@ -73,10 +73,10 @@ def envelope(body: dict) -> str:
 
 
 class FakeProc:
-    def __init__(self, stdout: str):
-        self.returncode = 0
+    def __init__(self, stdout: str, *, stderr: str = "", returncode: int = 0):
+        self.returncode = returncode
         self.stdout = stdout
-        self.stderr = ""
+        self.stderr = stderr
 
 
 def run_with(bodies):
@@ -212,6 +212,49 @@ class ErrcodeTest(Base):
              mock.patch.object(wecom_doc.subprocess, "run", fake):
             with self.assertRaises(LedgerError):
                 wecom_doc.doc_info("https://doc.weixin.qq.com/sheet/x")
+
+
+class SensitiveErrorTest(Base):
+    """任何企微 CLI 错误都可能被写日志、告警和 health.json，必须先脱敏。"""
+
+    SECRET = "SENSITIVE_TEST_TOKEN"
+
+    def assert_redacted(self, callback):
+        with self.assertRaises(LedgerError) as cm:
+            callback()
+        message = str(cm.exception)
+        self.assertNotIn(self.SECRET, message)
+        self.assertIn("***", message)
+
+    def test_raw_process_error_redacts_query_token(self):
+        proc = FakeProc("", returncode=1,
+                        stderr="network error: https://example.invalid/?share_code="
+                               + self.SECRET)
+        with mock.patch.object(wecom_doc, "wecom_cli_bin", return_value=EXE), \
+             mock.patch.object(wecom_doc.subprocess, "run", return_value=proc):
+            self.assert_redacted(lambda: wecom_doc._run_cli("sheet_get_info", {}))
+
+    def test_outer_json_error_redacts_assignment_token(self):
+        proc = FakeProc(json.dumps({"error": "access_token=" + self.SECRET}))
+        with mock.patch.object(wecom_doc, "wecom_cli_bin", return_value=EXE), \
+             mock.patch.object(wecom_doc.subprocess, "run", return_value=proc):
+            self.assert_redacted(lambda: wecom_doc._run_cli("sheet_get_info", {}))
+
+    def test_inner_errmsg_redacts_token(self):
+        calls, fake = run_with([{"errcode": 40001,
+                                 "errmsg": "Bearer " + self.SECRET}])
+        with mock.patch.object(wecom_doc, "wecom_cli_bin", return_value=EXE), \
+             mock.patch.object(wecom_doc.subprocess, "run", fake):
+            self.assert_redacted(
+                lambda: wecom_doc.doc_info("https://doc.weixin.qq.com/sheet/x"))
+
+    def test_polling_timeout_redacts_source_url(self):
+        calls, fake = run_with([{"errcode": 0, "task_done": False}])
+        url = "https://doc.weixin.qq.com/sheet/x?apikey=" + self.SECRET
+        with mock.patch.object(wecom_doc, "wecom_cli_bin", return_value=EXE), \
+             mock.patch.object(wecom_doc.subprocess, "run", fake), \
+             mock.patch.object(wecom_doc, "POLL_MAX", 1):
+            self.assert_redacted(lambda: wecom_doc.doc_content(url))
 
 
 class PollingTest(Base):

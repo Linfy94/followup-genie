@@ -21,6 +21,7 @@ date / has_column）的对象，core.py 不用为企微另写一套判定逻辑�
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from datetime import date, datetime
@@ -36,6 +37,23 @@ POLL_INTERVAL = 2.0
 POLL_BUDGET = 120.0      # 🔴 总时长闸门：cron 里绝不能挂死
 
 _DATE_FORMATS = ("%Y/%m/%d", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S")
+
+# 企微 CLI 的网络错误会原样回显请求 URL。查询参数一律不进错误文本：分享链接和
+# 上游接口的参数名都可能改，只按 apikey/token 名称做黑名单会再次泄露。
+_URL_QUERY_VALUE = re.compile(r"([?&][^?&#\s='\"<>]+=)[^&#\s'\"<>]*")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(\b(?:api[_-]?key|access[_-]?token|token|secret|signature|sig|key)\b\s*[:=]\s*)"
+    r"([\"']?)([^\s,;\"'{}\[\]]+)\2", re.IGNORECASE)
+_BEARER_TOKEN = re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+
+
+def _safe_error(value, limit: int = 300) -> str:
+    """错误文本的唯一出口：凭证先脱敏，再截断，绝不反过来。"""
+    text = str(value)
+    text = _URL_QUERY_VALUE.sub(r"\1***", text)
+    text = _SECRET_ASSIGNMENT.sub(r"\1***", text)
+    text = _BEARER_TOKEN.sub(r"\1***", text)
+    return text[:limit]
 
 # 同一份文档只取一次：美誉度那份要供 AI体检、GEO 两个台账用，
 # 而一次 get_doc_content 要轮询十几秒。不缓存等于每天多跑一遍。
@@ -116,23 +134,23 @@ def _run_cli(subcommand: str, payload: dict) -> dict:
         envelope = json.loads(raw)
     except json.JSONDecodeError as e:
         raise LedgerError(
-            f"wecom-cli 返回不是合法 JSON（{subcommand}）：{raw[:300]}") from e
+            f"wecom-cli 返回不是合法 JSON（{subcommand}）：{_safe_error(raw)}") from e
 
     if envelope.get("error"):
         raise LedgerError(
-            f"wecom-cli 调用失败（{subcommand}）：{envelope['error']}")
+            f"wecom-cli 调用失败（{subcommand}）：{_safe_error(envelope['error'])}")
 
     try:
         text = envelope["result"]["content"][0]["text"]
     except (KeyError, IndexError, TypeError) as e:
         raise LedgerError(
-            f"wecom-cli 返回结构不认识（{subcommand}）：{raw[:300]}") from e
+            f"wecom-cli 返回结构不认识（{subcommand}）：{_safe_error(raw)}") from e
 
     try:
         body = json.loads(text)
     except json.JSONDecodeError as e:
         raise LedgerError(
-            f"wecom-cli 的响应体不是合法 JSON（{subcommand}）：{text[:300]}") from e
+            f"wecom-cli 的响应体不是合法 JSON（{subcommand}）：{_safe_error(text)}") from e
 
     # 🔴 这一句是整个模块最重要的一行。
     #    实测拿不到权限时，JSON-RPC 外层是 `"isError": false`，错误只藏在
@@ -167,7 +185,7 @@ def _run_cli(subcommand: str, payload: dict) -> dict:
                 )
         raise LedgerError(
             f"企微文档接口报错（{subcommand}）：errcode={code} "
-            f"errmsg={body.get('errmsg')!r}。"
+            f"errmsg={_safe_error(body.get('errmsg'))!r}。"
             f"{guidance}"
             f"这不是「今天没有要催的」，是读不到数据。"
         )
@@ -197,7 +215,7 @@ def doc_content(url: str) -> str:
         if tries >= POLL_MAX or (time.monotonic() - started) > POLL_BUDGET:
             raise LedgerError(
                 f"企微文档内容轮询超时（{tries} 次 / "
-                f"{time.monotonic() - started:.0f}s）：{url}。"
+                f"{time.monotonic() - started:.0f}s）：{_safe_error(url)}。"
                 f"这不是「今天没有要催的」，是没取到数据。"
             )
         time.sleep(POLL_INTERVAL)
