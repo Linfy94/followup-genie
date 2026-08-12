@@ -529,10 +529,98 @@ def check_state(doc: Doc) -> None:
                     f"pid {info.get('pid')}（存活={alive}）")
 
 
+def list_values(ledger: dict, rules_cfg: dict, limit: int = 60) -> int:
+    """
+    只读枚举一份台账里、判据用到的每一列的**真实**取值。
+
+    ═══════════════════════════════════════════════════════════════════
+    改触发条件之前必须先看这个。业务口头说的写法照抄进配置，
+    **会一条都匹配不上** —— 而且不报错，只表现为那个节点从此不催：
+
+      · 同一个文件里三个子表，分行写「杭州」/「杭州分行」两种
+      · GEO 的「启动优化时间」全表 43 种写法，业务说的「未开始」
+        在表里根本不存在（实际是「未开始，等客户确认平台」等 7 种）
+
+    这两条都是靠一次性临时脚本发现的，每次要用都得重写一遍。做成常驻命令。
+
+    只列判据引用到的列（when / scope_filters / known_values / 计时起点 /
+    主键），不是全表 —— 全表没有哪一列值得看，反而把真正要核的淹掉。
+
+    🔴 这里可以截断。业务口径③「任何分组都全量列出、不许出现『另有 N 条』」
+       管的是**给业务的催办清单**；这是给改配置的人看的诊断输出，
+       一列几百种取值全打出来只会没法读。截断处会明说还剩多少。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    name = ledger.get("name") or ledger.get("id")
+    try:
+        sheet = core.read_ledger_sheet(ledger)
+    except LedgerError as e:
+        print(f"❌ 台账「{name}」读取失败：{e}", file=sys.stderr)
+        return 1
+
+    ruleset = (rules_cfg.get("rulesets") or {}).get(ledger.get("ruleset")) or {}
+
+    # 收集「判据真正依赖的列」。与 assert_sheet 那套引用收集同一个口径，
+    # 只是这里连停用的节点也列 —— 改配置时常常正要把某个停用节点打开。
+    fields: dict = {}
+
+    def note(field, why):
+        if field:
+            fields.setdefault(field, set()).add(why)
+
+    # 🔴 主键列与项目名称列**故意不列**。它们是身份，不是判据 ——
+    #    没有人会对企业名写触发条件，而把它们打出来只是把上百个客户名
+    #    刷满屏幕，把真正要核的那两三列淹掉。主键的唯一性另有 assert_sheet 管。
+    for c in (ledger.get("scope_filters") or []):
+        note(c.get("field"), "责任范围过滤")
+    for f in (ledger.get("known_values") or {}):
+        note(f, "取值白名单")
+    for node in ruleset.get("nodes") or []:
+        why = f"节点「{node.get('name') or node.get('id')}」" \
+              + ("" if node.get("enabled") else "（未启用）")
+        for c in (node.get("when") or []):
+            if isinstance(c, dict):
+                note(c.get("field"), why)
+        clock = node.get("clock") or {}
+        note(clock.get("field"), why + " 计时起点")
+        for f in core.clock_fallback_fields(clock):
+            note(f, why + " 计时兜底")
+
+    rows = sheet.data_rows
+    print(f"── 台账「{name}」（{ledger.get('source', 'tencent_mcp')}）"
+          f"共 {len(rows)} 行 ──\n")
+
+    for field in sorted(fields):
+        why = "、".join(sorted(fields[field]))
+        if not sheet.has_column(field):
+            print(f"🔴 「{field}」台账里没有这一列 —— 配置引用了它（{why}）。"
+                  f"判据会静默失效。\n")
+            continue
+        counts: dict = {}
+        for r in rows:
+            counts[sheet.text(r, field)] = counts.get(sheet.text(r, field), 0) + 1
+        blank = counts.pop("", 0)
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        print(f"【{field}】{len(ordered)} 种取值（{why}）"
+              + (f"，另有 {blank} 行为空" if blank else ""))
+        for value, n in ordered[:limit]:
+            # 自由文本列会有整段话，截一下才读得下去；配置里要写的是
+            # 完整值，所以截断处明确标出来，不让人照着半截抄。
+            shown = value if len(value) <= 60 else value[:60] + f"…（共 {len(value)} 字）"
+            print(f"    {n:5d} × {shown!r}")
+        if len(ordered) > limit:
+            rest = sum(n for _, n in ordered[limit:])
+            print(f"    …… 还有 {len(ordered) - limit} 种（共 {rest} 行）未显示")
+        print()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="项目跟进精灵 · 自检")
     ap.add_argument("--validate-config", action="store_true",
                     help="只查配置，不联网、不读台账")
+    ap.add_argument("--values", metavar="台账id",
+                    help="只读列出这份台账里判据用到的各列真实取值（改触发条件前先看它）")
     args = ap.parse_args()
 
     # 自检是纯诊断工具，任何情况下都不写状态、不改坏文件、不发消息。
@@ -545,6 +633,22 @@ def main() -> int:
         print(doc.render())
         return 2
     ledgers_cfg, rules_cfg, output_cfg = cfgs
+
+    if args.values:
+        # 配置有问题时先把配置报告打出来 —— 拿着一份坏配置去枚举取值，
+        # 看到的东西没有意义。
+        if doc.bad:
+            print(doc.render())
+            return 2
+        wanted = [l for l in ledgers_cfg.get("ledgers", [])
+                  if isinstance(l, dict) and l.get("id") == args.values]
+        if not wanted:
+            ids = [l.get("id") for l in ledgers_cfg.get("ledgers", [])
+                   if isinstance(l, dict)]
+            print(f"❌ ledgers.json 里没有 id={args.values!r} 的台账。"
+                  f"现有：{', '.join(str(i) for i in ids)}", file=sys.stderr)
+            return 2
+        return list_values(wanted[0], rules_cfg)
 
     if not args.validate_config:
         enabled = [l for l in ledgers_cfg.get("ledgers", [])
