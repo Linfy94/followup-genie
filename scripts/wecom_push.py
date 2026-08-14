@@ -249,8 +249,12 @@ def _post(url: str, payload: dict) -> tuple[bool, str]:
     try:
         # 走 nethttp：TLS 1.3 被中间层搞坏时自动降到 1.2。见该模块头注。
         # 2026-08-14 就是这条链路上 0/1 条失败，业务没收到当天的清单。
-        with nethttp.urlopen(req, timeout=20) as r:
-            data = json.loads(r.read().decode("utf-8", "replace"))
+        # 🔴 idempotent=False：这是「发出去就收不回」的调用。仍然会降级重试
+        #    （宁可重复，也不静默漏催），但响应阶段失败后的重试会额外提示
+        #    可能重复，业务真收到两条时原因在日志里查得到。
+        data = json.loads(
+            nethttp.fetch(req, timeout=20, idempotent=False)
+            .decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
         return False, f"HTTP {e.code}"
     except Exception as e:

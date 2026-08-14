@@ -109,8 +109,11 @@ def _rpc(method: str, params: dict | None = None) -> dict:
         try:
             req = urllib.request.Request(ENDPOINT, data=body, headers=headers)
             # 走 nethttp：TLS 1.3 被中间层搞坏时自动降到 1.2。见该模块头注。
-            with nethttp.urlopen(req, timeout=TIMEOUT) as resp:
-                raw = resp.read().decode("utf-8", "replace")
+            # 🔴 read() 必须由 nethttp 代做 —— 读到一半断掉同样是 TLS 失败，
+            #    留在这里就既不降级、也只表现成普通重试失败。
+            # 只读的 JSON-RPC，重发无副作用 → idempotent=True。
+            raw = nethttp.fetch(req, timeout=TIMEOUT,
+                                idempotent=True).decode("utf-8", "replace")
             break
         except urllib.error.HTTPError as e:
             last = f"HTTP {e.code}"
