@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -89,7 +90,59 @@ def child_env(exe: str, extra: dict | None = None) -> dict:
         env.pop(name, None)
     env.update(extra or {})
     env["PATH"] = child_path(exe)
+    if _tls_degraded:
+        # Node 22 实测接受这个开关，DEFAULT_MAX_VERSION 变成 TLSv1.2。
+        env["NODE_OPTIONS"] = (env.get("NODE_OPTIONS", "") +
+                               " --tls-max-v1.2").strip()
     return env
+
+
+# ── TLS 1.3 兜底 ──────────────────────────────────────────────────────
+#
+# 🔴 `lark-cli` 与 `wecom-cli` 都是 Node，**有各自的 TLS 栈**，
+#    scripts/nethttp.py 那套只管 Python 侧的两个出口，管不到它们。
+#
+#    2026-08-14 实测：本机代理把所有 TLS 1.3 记录搞坏（腾讯文档、企微、
+#    飞书、乃至 Google 全断，TLS 1.2 全通）。Python 侧当天就修好了，
+#    而 Node 侧当天仍然打挂了一次生产运行 ——
+#    「AI哨兵前期台账：lark-cli 调用失败：remote error: tls: bad record MAC」，
+#    退出码 1。修完一半比没修更危险：看起来已经扛住了。
+#
+#    做法与 nethttp 保持一致，**不写死 1.2**：第一次撞上 TLS 失败才降级，
+#    降级后本进程内粘住，进程重启重新试 1.3 —— 网络修好当天自动恢复。
+_tls_degraded = False
+
+# 各家 CLI 的报错措辞不一样，但底下都是 Go/Node 的 TLS 层。
+# 宁可多认一种，也不要因为换了措辞就退回「读不到数据」——
+# 那会伪装成「今天没有要催的」。
+_TLS_MARKS = ("bad record mac", "tls:", "ssl", "handshake")
+
+
+def looks_like_tls_failure(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _TLS_MARKS)
+
+
+def tls_degraded() -> bool:
+    return _tls_degraded
+
+
+def mark_tls_degraded(stream=None) -> bool:
+    """记下「这台机器的 TLS 1.3 是坏的」。返回是否由本次调用首次标记。"""
+    global _tls_degraded
+    if _tls_degraded:
+        return False
+    _tls_degraded = True
+    print("⚠️ 外部命令行工具的 TLS 1.3 握手失败，本次运行改用 TLS 1.2 重试。"
+          "这通常是本机代理/VPN 搞坏了 TLS 1.3；程序能继续跑，但值得查一下网络。",
+          file=stream or sys.stderr)
+    return True
+
+
+def reset_tls() -> None:
+    """只给测试用。"""
+    global _tls_degraded
+    _tls_degraded = False
 
 
 def find_bin(name: str) -> str | None:

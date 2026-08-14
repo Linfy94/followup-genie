@@ -148,6 +148,24 @@ def _cli_error(payload: dict, args: list[str]) -> str:
 
 
 def _run_cli(subcommand: str, args: list[str]) -> dict:
+    """
+    TLS 失败时降到 TLS 1.2 重试一次。判据与降级动作住在 cli_env，
+    lark-cli 与 wecom-cli **共用同一份** —— 两个都是 Node、都有自己的
+    TLS 栈，scripts/nethttp.py 那套管不到它们。
+
+    🔴 2026-08-14 只修了 Python 侧就以为扛住了，当天 Node 侧仍然打挂一次
+       生产运行（lark-cli：remote error: tls: bad record MAC，退出码 1）。
+       **修完一半比没修更危险**：看起来已经好了。
+    """
+    try:
+        return _run_cli_once(subcommand, args)
+    except LedgerError as e:
+        if cli_env.tls_degraded() or not cli_env.looks_like_tls_failure(str(e)):
+            raise
+        cli_env.mark_tls_degraded()
+        return _run_cli_once(subcommand, args)
+
+def _run_cli_once(subcommand: str, args: list[str]) -> dict:
     """调只读白名单内的一个 lark-cli base 子命令，返回解析后的 JSON 信封。"""
     if subcommand not in ALLOWED_SUBCOMMANDS:
         raise LedgerError(
