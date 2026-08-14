@@ -31,6 +31,8 @@ import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
+import nethttp
+
 # ── 只读白名单：改动此处等于改动安全边界，需人工评审 ────────────────────
 ALLOWED_TOOLS = frozenset({
     "sheet.get_sheet_info",     # 只返回子表行列数
@@ -106,7 +108,8 @@ def _rpc(method: str, params: dict | None = None) -> dict:
     for attempt in range(RETRIES):
         try:
             req = urllib.request.Request(ENDPOINT, data=body, headers=headers)
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            # 走 nethttp：TLS 1.3 被中间层搞坏时自动降到 1.2。见该模块头注。
+            with nethttp.urlopen(req, timeout=TIMEOUT) as resp:
                 raw = resp.read().decode("utf-8", "replace")
             break
         except urllib.error.HTTPError as e:

@@ -32,6 +32,7 @@ import urllib.error
 import urllib.request
 
 import core
+import nethttp
 
 # 留 96 字节余量，避免 emoji/换行的字节数估算偏差踩线
 DEFAULT_SPLIT_BYTES = 4000
@@ -246,7 +247,9 @@ def _post(url: str, payload: dict) -> tuple[bool, str]:
         url, data=body, headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        # 走 nethttp：TLS 1.3 被中间层搞坏时自动降到 1.2。见该模块头注。
+        # 2026-08-14 就是这条链路上 0/1 条失败，业务没收到当天的清单。
+        with nethttp.urlopen(req, timeout=20) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
         return False, f"HTTP {e.code}"

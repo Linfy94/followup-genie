@@ -6,7 +6,7 @@
 
 ---
 
-> `0.6.0-rc2` 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍需业务电脑验证。
+> `0.6.0-rc3` 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍需业务电脑验证。
 
 业务不需要懂 Git、代码或命令行，也不需要阅读本文件。
 
@@ -201,4 +201,4 @@ python3 scripts/check_followup.py --dry-run --verify-readonly
 ./run_tests.sh
 ```
 
-当前发布版本：`0.6.0-rc2`。真实凭证、业务配置、客户数据和状态不得进入仓库。
+当前发布版本：`0.6.0-rc3`。真实凭证、业务配置、客户数据和状态不得进入仓库。
