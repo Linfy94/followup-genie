@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import date, datetime
 
@@ -286,7 +287,27 @@ def _cell_date(v) -> date | None:
         return datetime.fromisoformat(s[:-1] + "+00:00" if s.endswith("Z")
                                       else s).date()
     except ValueError:
+        pass
+    return _embedded_date(s)
+
+
+# 「已完成,2026年08月07日」这种：状态和日期挤在同一列里。
+# 🔴 只认**完整的年月日**。业务 2026-08-14 定 ④发货 用「方案完成情况」计时，
+#    而同一批数据里舆情的「日期」列存在只写 '2026' 的行 —— 把它猜成 2026-01-01
+#    会得到一个看起来正常、实际错了大半年的计时起点，
+#    **比解析失败更难发现**（失败至少会跳过并报警）。所以年份单独出现一律不认。
+_EMBEDDED_DATE = re.compile(
+    r"(\d{4})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*日?")
+
+
+def _embedded_date(s: str) -> date | None:
+    m = _EMBEDDED_DATE.search(s)
+    if not m:
         return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None  # 2026年13月45日 这种：认出了形状但不是合法日期
 
 
 class Sheet:

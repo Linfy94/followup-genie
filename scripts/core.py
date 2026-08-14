@@ -1588,6 +1588,49 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         # “为空就会跳过”；实际只有整组都不可用时才会在当前节点报无起点。
         if clock.get("field"):
             date_fields.add(clock["field"])
+    # 🔴 只看**责任范围内、且还没终止**的行。业务 2026-08-14 逐条核对后定的口径。
+    #
+    #    在此之前这里扫的是全表，于是每天报的几乎全是噪声：舆情「日期」报
+    #    1056 行为空，实际全在责任范围外（江苏、南京那些，本来就不催）；
+    #    GEO 报 256 行空值，责任范围内是 0 行。真正要动手的问题被埋在里面 ——
+    #    飞书「立项时间」整列 731 行解析失败、3 个项目无人管，就是这么被盖住的，
+    #    直到业务自己问了一句「那行警告是什么」才挖出来。
+    #
+    #    **告警太吵和告警缺失是同一种失效**：一堆没人看的警告 == 没有警告。
+    #
+    #    终止行也要排除：已交付/已关闭的项目，日期填没填都不影响任何判定。
+    #    舆情那 5 行「解析不出」全是「已交付」、值只是个 '2026'，报它没有意义。
+    scoped_set = set(scoped)
+    terminal_conds = ledger.get("terminal_states") or []
+
+    def _is_terminal(r: int) -> bool:
+        return bool(terminal_conds) and all(
+            match_condition(lambda f, _r=r: sheet.text(_r, f), c)
+            for c in terminal_conds)
+
+    live = [r for r in scoped if not _is_terminal(r)]
+
+    # 🔴 再收一层：**只报真正会用到这一列的行**。
+    #    2026-08-14 差点自己制造一批新噪声 —— ④发货 改用「方案完成情况」计时后，
+    #    那些值是「未完成」的行被报成「解析不出日期」，可它们根本进不了这个节点
+    #    （when 要求 contains 已完成）。报了也没人该动手，纯属吵。
+    #    这里按节点自己的 when 过滤，宁可略微多报（一行同时满足两个节点的 when
+    #    时，实际只会落在靠前那个），也不少报。
+    def _rows_needing(field: str) -> list[int]:
+        want = set()
+        for node in ruleset.get("nodes", []):
+            if not node.get("enabled"):
+                continue
+            if (node.get("clock") or {}).get("field") != field:
+                continue
+            conds = node.get("when") or []
+            want.update(
+                r for r in live
+                if conds and all(
+                    match_condition(lambda f, _r=r: sheet.text(_r, f), c)
+                    for c in conds))
+        return sorted(want)
+
     for f in sorted(date_fields):
         # 🔴 「该列为空」和「有内容但解析不出日期」必须分开说。
         #    合起来报「N 行无法解析为日期」会把「业务还没填」说成故障 ——
@@ -1595,7 +1638,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         #    哨兵前期 11 行、飞书 53 行报「无法解析」，实际全是空值，完全正常。
         #    而真正的解析失败（比如关联字段读出 record id）才是要动手的问题。
         blank, unparsable = [], []
-        for r in rows:
+        for r in _rows_needing(f):
             if sheet.date(r, f) is not None:
                 continue
             (blank if not sheet.text(r, f) else unparsable).append(
@@ -1613,6 +1656,17 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
                 f"这些行在依赖该列的节点上会被跳过。"
                 f"常见原因：该列实际是关联/引用字段，读到的是记录 ID 而不是日期。"
             )
+        # 范围外的只聚合成一句，不点名 —— 它们现在不催，但哪天进了责任范围
+        # 就会立刻变成上面那两条。丢掉这句等于丢掉预警（同 1572 行那条的路子）。
+        out_bad = sum(1 for r in rows
+                      if r not in scoped_set and sheet.date(r, f) is None
+                      and sheet.text(r, f))
+        if out_bad:
+            a.warnings.append(
+                f"{f} 在责任范围外还有 {out_bad} 行解析不出日期。"
+                f"这些行本来就不催，所以不逐条点名；"
+                f"但它们哪天进了责任范围，就会变成上面那种问题。"
+            )
         today = date.today()
         future = [
             row_key(sheet, r, kfields) for r in rows
@@ -1625,14 +1679,26 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
             )
 
     # ── 数据一致性：取值白名单 ──
+    # 🔴 这里**不能一刀切地收窄到责任范围内**，两类列的用途相反：
+    #
+    #    · 用于 scope_filters 的列（比如「分行」）必须继续扫**全表** ——
+    #      它正是「台账把『深圳分行』改成『深圳』导致整表落空」那道护栏。
+    #      先按范围过滤再检查，等于用出问题的那个条件去筛出问题的证据，
+    #      写法一变就再也报不出来，而表现是「今天没有要催的」。
+    #    · 其余列（状态、启动优化时间…）只影响范围内的判定，
+    #      扫全表只会把范围外的噪声顶上来（GEO 实测：全表 1 种未知取值，
+    #      5 行全在范围外）。
+    scope_fields = {c.get("field") for c in (ledger.get("scope_filters") or [])}
     for field, allowed in (ledger.get("known_values") or {}).items():
         if not sheet.has_column(field):
             continue
-        seen = {sheet.text(r, field) for r in rows}
+        subject = rows if field in scope_fields else live
+        seen = {sheet.text(r, field) for r in subject}
         unknown = sorted(v for v in seen if v and v not in allowed)
         if unknown:
+            where = "全表" if field in scope_fields else "责任范围内未终止的行"
             a.warnings.append(
-                f"{field} 出现未知取值 {unknown}（已知：{allowed}）。"
+                f"{field} 出现未知取值 {unknown}（已知：{allowed}；查的是{where}）。"
                 f"若该列用于范围过滤，这些行会被静默丢掉——请确认是否写法不统一。"
             )
 

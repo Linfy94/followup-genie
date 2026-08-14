@@ -338,3 +338,48 @@ class IsoDateCellTest(unittest.TestCase):
         for s in ("", "待定", "recv0wSKfAQh3v", "2025-13-45", "第三季度"):
             with self.subTest(s=s):
                 self.assertIsNone(lark_base._cell_date(s))
+
+
+class EmbeddedDateTest(unittest.TestCase):
+    """
+    状态和日期挤在同一列里时，要能把日期抽出来 —— 但**只认完整年月日**。
+
+    ═══════════════════════════════════════════════════════════════════
+    业务 2026-08-14：④发货 改用「方案完成情况」计时，其值形如
+    「已完成,2026年08月07日」。（业务原话说的是「方案评估时间」，
+    但实测那一列是关联字段、读到的是记录 ID，取不到日期。）
+
+    🔴 年份单独出现一律不认。同一批数据里舆情「日期」列有只写 '2026' 的行，
+       猜成 2026-01-01 会得到一个看起来正常、实际错了大半年的计时起点 ——
+       **比解析失败更难发现**，因为解析失败至少会跳过并报警。
+    ═══════════════════════════════════════════════════════════════════
+    """
+
+    def test_the_exact_strings_from_production(self):
+        self.assertEqual(lark_base._cell_date("已完成,2026年08月07日"),
+                         date(2026, 8, 7))
+        self.assertEqual(lark_base._cell_date("已完成,2026年08月12日"),
+                         date(2026, 8, 12))
+
+    def test_other_embedded_shapes(self):
+        for s, want in (("方案已评估 2026-08-07 完成", date(2026, 8, 7)),
+                        ("已完成,2026/8/7", date(2026, 8, 7)),
+                        ("2026年8月7日", date(2026, 8, 7))):
+            with self.subTest(s=s):
+                self.assertEqual(lark_base._cell_date(s), want)
+
+    def test_a_bare_year_is_never_guessed(self):
+        """🔴 舆情「日期」列真有只写 '2026' 的行。猜出来的起点比没有更糟。"""
+        for s in ("2026", "2026年", "2026 年上半年", "26年8月"):
+            with self.subTest(s=s):
+                self.assertIsNone(lark_base._cell_date(s))
+
+    def test_impossible_dates_are_rejected(self):
+        for s in ("已完成,2026年13月45日", "2026-02-30"):
+            with self.subTest(s=s):
+                self.assertIsNone(lark_base._cell_date(s))
+
+    def test_status_without_any_date_is_none(self):
+        for s in ("未完成", "已完成", "待评估"):
+            with self.subTest(s=s):
+                self.assertIsNone(lark_base._cell_date(s))
