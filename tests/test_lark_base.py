@@ -291,3 +291,50 @@ class ReadOnlyWhitelistTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IsoDateCellTest(unittest.TestCase):
+    """
+    飞书日期列的真实形状是 ISO-8601，认不出来会让整条业务线静默漏催。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-14 实测：哨兵飞书主台账「立项时间」返回
+       '2025-10-24T16:06:34.000+08:00'，而适配层只认三种 strptime 格式，
+       **731 行全部解析失败**。后果不是报错，是 ④发货 拿不到计时起点 →
+       3 个项目落进「没有任何节点管」：既不催、也不终止。
+       运行报告里只有一行数据质量警告，配置注释里还写着「72/72 都能解析」。
+
+       解析失败 → None → 节点静默跳过，这是本项目最怕的失败形态，
+       所以这里把真实字符串一字不差地钉住。
+    ═══════════════════════════════════════════════════════════════════
+    """
+
+    def test_the_exact_string_from_production(self):
+        self.assertEqual(lark_base._cell_date("2025-10-24T16:06:34.000+08:00"),
+                         date(2025, 10, 24))
+
+    def test_iso_variants(self):
+        cases = {
+            "2025-10-24T16:06:34.000+08:00": date(2025, 10, 24),
+            "2025-10-24T16:06:34+08:00": date(2025, 10, 24),
+            "2025-10-24T16:06:34": date(2025, 10, 24),
+            "2025-10-24T00:00:00Z": date(2025, 10, 24),   # 3.9 的 fromisoformat 不认 Z
+        }
+        for s, want in cases.items():
+            with self.subTest(s=s):
+                self.assertEqual(lark_base._cell_date(s), want)
+
+    def test_old_formats_still_work(self):
+        """原有三种格式一个都不能丢 —— 别的台账还在用。"""
+        for s in ("2025-10-24 16:06:34", "2025-10-24", "2025/10/24"):
+            with self.subTest(s=s):
+                self.assertEqual(lark_base._cell_date(s), date(2025, 10, 24))
+
+    def test_junk_still_returns_none(self):
+        """
+        认不出来必须返回 None，不许瞎猜一个日期 ——
+        猜错的计时起点会算出一个看起来正常的超期天数，比不催更难发现。
+        """
+        for s in ("", "待定", "recv0wSKfAQh3v", "2025-13-45", "第三季度"):
+            with self.subTest(s=s):
+                self.assertIsNone(lark_base._cell_date(s))

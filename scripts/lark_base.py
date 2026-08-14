@@ -261,6 +261,18 @@ def _cell_text(v) -> str:
 
 
 def _cell_date(v) -> date | None:
+    """
+    单元格转日期。**认不出来返回 None，而 None 会让整个节点静默跳过**，
+    所以这里少认一种格式的代价是「那些项目再也不催」，且只有运行报告里
+    一行数据质量警告可查。
+
+    🔴 2026-08-14 实测踩到：飞书哨兵主台账的「立项时间」返回的是
+       `2025-10-24T16:06:34.000+08:00`（带 T、毫秒、时区偏移），
+       上面三种 strptime 格式一种都不匹配 → **731 行全部解析失败**。
+       配置注释里还写着「72/72 都能解析」，说明 lark-cli 或字段类型
+       在某次之后改了输出形状，而这件事不报错、只表现成「今天没有要催的」。
+       ISO-8601 是飞书的原生形状，必须直接认。
+    """
     s = _cell_text(v)
     if not s:
         return None
@@ -269,7 +281,12 @@ def _cell_date(v) -> date | None:
             return datetime.strptime(s, fmt).date()
         except ValueError:
             continue
-    return None
+    try:
+        # Python 3.9 的 fromisoformat 不认末尾的 Z，先换成等价的 +00:00。
+        return datetime.fromisoformat(s[:-1] + "+00:00" if s.endswith("Z")
+                                      else s).date()
+    except ValueError:
+        return None
 
 
 class Sheet:
