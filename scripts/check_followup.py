@@ -912,6 +912,9 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
                                    total_due, real_run, workday)
 
     if real_run:
+        # 🔴 只在真实运行写。--dry-run 被只读闸门挡住，所以 doctor 比对的
+        #    永远是「定时任务上一次真的跑成什么样」，而不是谁随手试跑了一下。
+        core.update_health(runtime=core.runtime_fingerprint())
         core.update_health(last_run_summary={
             "at": core.now_iso(),
             "read": read_count,

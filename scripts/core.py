@@ -18,6 +18,7 @@ from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
 import calendar
 import json
 import os
+import ssl
 import sys
 import uuid
 from contextlib import contextmanager
@@ -631,6 +632,35 @@ def update_health(**fields) -> None:
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def runtime_fingerprint() -> dict:
+    """
+    「这一趟是哪个 Python 在跑」。**doctor 与主流程共用这一份**（坑 #12）。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-14 这台机器上同时存在三个 Python，SSL 后端各不相同：
+
+        /usr/bin/python3                        3.9.6   LibreSSL 2.8.3
+        /opt/homebrew/bin/python3               3.14.6  OpenSSL 3.6.3
+        ~/.hermes/hermes-agent/venv/bin/python  3.11.15 OpenSSL 3.5.7  ← cron 跑的
+
+    LibreSSL 2.8.3 根本不支持 TLS 1.3，另两个支持。于是同一份代码、同一个
+    网络，在不同解释器下表现完全相反 —— 排查那天我自己敲了裸 `python3`
+    落到 Homebrew 那个，把「用错解释器」和「真故障」混在一起，白花近一小时。
+
+    所以真实运行把这个指纹记进 health.json，`doctor` 拿自己的跟它比：
+    对不上就明说「你现在这个不是定时任务跑的那个」。
+    **不写死路径**（那只在这台 Hermes 上成立，业务电脑与 WorkBuddy 都不同），
+    靠比对，任何机器上都成立。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    return {
+        "executable": sys.executable,
+        "python": sys.version.split()[0],
+        # 没编进 SSL 的 Python 极罕见，但这里是诊断代码，不许自己裸崩
+        "ssl": getattr(ssl, "OPENSSL_VERSION", "未知（该 Python 没有 ssl 模块）"),
+    }
 
 
 # ── 需求文档变更探测 ──────────────────────────────────────────────────
@@ -1650,12 +1680,34 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
                 f"这些行在依赖该列的节点上会被跳过 —— 若属正常（业务尚未填写）可忽略。"
             )
         if unparsable:
-            a.warnings.append(
-                f"{f} 有 {len(unparsable)} 行有内容但解析不出日期"
-                f"（{', '.join(unparsable[:8])}{' 等' if len(unparsable) > 8 else ''}）。"
-                f"这些行在依赖该列的节点上会被跳过。"
-                f"常见原因：该列实际是关联/引用字段，读到的是记录 ID 而不是日期。"
-            )
+            # 🔴 「整列全废」和「几行填错」是两回事，必须分开说。
+            #
+            #    2026-08-14：飞书「立项时间」整列 731 行解析失败（列类型变成了
+            #    带时区的 ISO 字符串），后果是 ④发货 拿不到计时起点、
+            #    3 个项目掉进「既不催也不终止」。而它当天报出来的样子，
+            #    和「3 行业务还没填」**一模一样**，就那么躺了不知道多久 ——
+            #    最后是业务随口问了一句「那行警告是什么」才挖出来。
+            #
+            #    这条警告本来就会进企微推送（render_wecom 的「需要注意」那节），
+            #    所以问题从来不在通道，**在措辞分不出轻重**。
+            needed = len(_rows_needing(f))
+            if unparsable and len(unparsable) == needed:
+                a.warnings.append(
+                    f"🔴 {f} 整列失效：需要这一列的 {needed} 行**没有一行**能算出日期。"
+                    f"依赖它的节点现在一条都不会催，而这不会报错。"
+                    f"几乎可以肯定是台账里那一列的类型或写法变了"
+                    f"（例如从日期列改成了关联字段、或改成了带时区的时间戳）。"
+                    f"举例：{', '.join(unparsable[:5])}"
+                    f"{' 等' if len(unparsable) > 5 else ''}"
+                )
+            else:
+                a.warnings.append(
+                    f"{f} 有 {len(unparsable)} 行有内容但解析不出日期"
+                    f"（{', '.join(unparsable[:8])}"
+                    f"{' 等' if len(unparsable) > 8 else ''}）。"
+                    f"这些行在依赖该列的节点上会被跳过。"
+                    f"常见原因：该列实际是关联/引用字段，读到的是记录 ID 而不是日期。"
+                )
         # 范围外的只聚合成一句，不点名 —— 它们现在不催，但哪天进了责任范围
         # 就会立刻变成上面那两条。丢掉这句等于丢掉预警（同 1572 行那条的路子）。
         out_bad = sum(1 for r in rows

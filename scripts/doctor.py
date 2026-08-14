@@ -18,7 +18,9 @@ import json
 import sys
 from datetime import date, datetime
 
+import cli_env
 import core
+import nethttp
 import qqdoc
 import lark_base
 import wecom_doc
@@ -55,6 +57,87 @@ class Doc:
         else:
             out.append(f"{OK} 全部通过")
         return "\n".join(out)
+
+
+def check_runtime(doc: Doc) -> None:
+    """
+    这一趟跑在哪个 Python 上，以及它是不是定时任务用的那个。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-14 排查一天三个故障时，`doctor` 关于运行环境**一个字都不报**。
+       这台机器上有三个 Python、三套 SSL 后端（LibreSSL 2.8.3 不支持 TLS 1.3，
+       另两个支持），同一份代码在不同解释器下表现完全相反。
+       我自己敲了裸 `python3` 落到 Homebrew 那个，把「用错解释器」
+       和「真故障」混在一起，白花近一小时。这两行就是为了消灭那一小时。
+
+       比对靠 health.json 里上一次**真实运行**记下的指纹，
+       **不写死任何路径** —— 写死只在这台 Hermes 上成立，
+       业务电脑和 WorkBuddy 的路径都不同。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    me = core.runtime_fingerprint()
+    doc.add(OK, "运行环境",
+            f"解释器：{me['executable']}\n"
+            f"Python：{me['python']}｜SSL：{me['ssl']}")
+
+    try:
+        theirs = (core.read_health() or {}).get("runtime") or {}
+    except Exception:  # noqa: BLE001 —— 自检不能因为读不到健康记录就裸崩
+        theirs = {}
+    if not theirs.get("executable"):
+        doc.add(OK, "定时任务用的解释器：还没有记录",
+                "下一次真实运行（不是 --dry-run）会记下来，之后这里会自动比对。")
+        return
+    if theirs["executable"] == me["executable"]:
+        doc.add(OK, "解释器与定时任务一致")
+        return
+    doc.add(WARN, "🔴 你现在这个解释器，不是定时任务跑的那个",
+            f"定时任务：{theirs['executable']}\n"
+            f"          Python {theirs.get('python', '?')}｜SSL {theirs.get('ssl', '?')}\n"
+            f"你现在　：{me['executable']}\n"
+            f"          Python {me['python']}｜SSL {me['ssl']}\n"
+            "SSL 后端不同会让 TLS 行为不同（LibreSSL 2.8.3 不支持 TLS 1.3，"
+            "OpenSSL 3.x 默认用它）。\n"
+            "在这里试出来的结果，不代表明天 9:00 的结果 —— "
+            "要复现定时任务，请用上面那个解释器跑。")
+
+
+def check_tls(doc: Doc) -> None:
+    """
+    这一趟有没有因为 TLS 1.3 坏掉而降级到 1.2。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-14：本机代理把**所有** TLS 1.3 记录搞坏（腾讯文档、企微、
+       飞书、乃至 Google 全断，TLS 1.2 全通）。当天读数正常，但企微推送
+       0/1 条失败 —— 业务没收到清单，而报错只是一行 SSL 异常。
+       程序现在能自动降到 TLS 1.2（scripts/nethttp.py + scripts/cli_env.py），
+       所以这**不再是故障**，但它值得一眼看见。
+
+    🔴 这里刻意**不做主动探针**，试过，砍掉了：
+       写过一版「对各服务分别用 TLS1.3 / TLS1.2 各握一次手」的探针，
+       实测它同一份报告里给出自相矛盾的结论 —— 上面刚报「本次已降级」，
+       下面却说三个站 TLS1.3 全通，还把一个实际读取成功的域名判成「连不上」。
+       原因是探针只发一个 `HEAD /`，太小，复现不出 bad record mac
+       这种与数据量相关的故障；而 curl 与 Python 对同一主机的表现也不一致。
+
+       **一份自相矛盾的自检报告比没有更糟** —— 它会让人怀疑整份报告。
+       下面这个判据来自**这一趟的真实流量**，不会说谎，而且零额外网络。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    degraded = []
+    if nethttp.degraded():
+        degraded.append("Python 侧（腾讯文档取数 / 企微推送）")
+    if cli_env.tls_degraded():
+        degraded.append("命令行工具侧（lark-cli / wecom-cli）")
+    if not degraded:
+        doc.add(OK, "TLS：本次运行未发生降级")
+        return
+    doc.add(WARN, "本次运行已降级到 TLS 1.2",
+            "、".join(degraded) + "\n"
+            "程序自己扛住了，催办不受影响 —— 但这说明本机到外网的 TLS 1.3 是坏的，"
+            "多半是代理/VPN 软件。\n"
+            "想自己确认，在终端跑：curl -sI --tlsv1.3 https://qyapi.weixin.qq.com\n"
+            "网络修好后无需改配置：每个进程都会先试 TLS 1.3，自动恢复。")
 
 
 def check_configs(doc: Doc) -> tuple[dict, dict, dict] | None:
@@ -628,6 +711,9 @@ def main() -> int:
     core.set_read_only(True)
 
     doc = Doc()
+    # 排在最前：后面每一项的结论都依赖「这是哪个解释器」。
+    # 离线也跑 —— 用错解释器这件事和联不联网无关。
+    check_runtime(doc)
     cfgs = check_configs(doc)
     if cfgs is None:
         print(doc.render())
@@ -683,6 +769,8 @@ def main() -> int:
                 if not wecom_ok[url]:
                     continue
             check_ledger(doc, ledger, rules_cfg)
+        # 放在台账都读完之后：降级标志到这时才是这一趟的真实结论。
+        check_tls(doc)
         check_reminders(doc, output_cfg)
         check_wecom(doc, output_cfg)
         check_alert(doc, output_cfg)
