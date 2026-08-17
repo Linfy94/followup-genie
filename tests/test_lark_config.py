@@ -240,12 +240,12 @@ class CrossLedgerFieldMustExistTest(unittest.TestCase):
         orig = core.read_ledger_sheet
         core.read_ledger_sheet = lambda l: sheet
         try:
-            index, specs = core._cross_ledger_values(
+            index, specs, _guard = core._cross_ledger_values(
                 {"ledger_id": "qq", "target_field": "项目名称"},
                 {"qq": target}, {})
         finally:
             core.read_ledger_sheet = orig
-        self.assertEqual(index, {("甲公司",): 1, ("乙公司",): 1})
+        self.assertEqual(index, {("甲公司",): [None], ("乙公司",): [None]})
         self.assertEqual(specs[0]["target_field"], "项目名称")
 
     def test_scope_filter_is_applied_before_indexing(self):
@@ -257,10 +257,10 @@ class CrossLedgerFieldMustExistTest(unittest.TestCase):
             row(2, "范围外公司", place="宁波"),
         ])
         with mock.patch.object(core, "read_ledger_sheet", return_value=sheet):
-            index, _ = core._cross_ledger_values(
+            index, _, _guard = core._cross_ledger_values(
                 {"ledger_id": "qq", "target_field": "项目名称"},
                 {"qq": target}, {})
-        self.assertEqual(index, {("范围内公司",): 1})
+        self.assertEqual(index, {("范围内公司",): [None]})
 
     def test_cache_key_includes_target_fields(self):
         target = {"id": "qq", "name": "前期台账", "source": "tencent_mcp",
@@ -268,12 +268,12 @@ class CrossLedgerFieldMustExistTest(unittest.TestCase):
         sheet = make_sheet([row(1, "甲公司", place="杭州")])
         cache = {}
         with mock.patch.object(core, "read_ledger_sheet", return_value=sheet) as read:
-            names, _ = core._cross_ledger_values(
+            names, _, _g1 = core._cross_ledger_values(
                 {"ledger_id": "qq", "target_field": "项目名称"}, {"qq": target}, cache)
-            regions, _ = core._cross_ledger_values(
+            regions, _, _g2 = core._cross_ledger_values(
                 {"ledger_id": "qq", "target_field": "地点"}, {"qq": target}, cache)
-        self.assertEqual(names, {("甲公司",): 1})
-        self.assertEqual(regions, {("杭州",): 1})
+        self.assertEqual(names, {("甲公司",): [None]})
+        self.assertEqual(regions, {("杭州",): [None]})
         self.assertEqual(read.call_count, 2)
 
 

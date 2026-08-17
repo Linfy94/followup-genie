@@ -249,6 +249,45 @@ def cross_match_fields(cfg: dict, default_local: str = "项目名称") -> list[d
     return result
 
 
+def cross_not_before(cfg: dict) -> dict | None:
+    """
+    跨台账核对的「时间不可能倒流」约束。没配就返回 None（保持原行为）。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 业务 2026-08-14 报的真事：某个项目被催「待登记飞书」，
+       但它在主台账里明明已经有了 —— **同名两条**，
+       一条立项 2026-06-17、一条 2026-08-06，
+       而前期台账里这个需求 2026-07-24 才提出来。
+       06-17 那条比需求本身还早 37 天，**不可能是它**。
+
+       原来的跨表核对只数命中条数：2 条 → 无法确认 → 继续催。
+       逻辑没错，是信息不够。
+
+    这条约束的依据：飞书里的项目是由前期台账推进过去的，
+    **它的立项时间不可能早于这个需求被提出的时间**。
+    实测当时处于「待登记飞书」的 10 个项目：9 条单命中全部满足该不等式
+    （最小富余 +6 天），错误那条是 −37 天 —— 分离得很开，
+    所以**不设「容差天数」参数**：少一个旋钮，少一处配错的地方。
+
+    🔴 它只做**排除**，不做挑选，因此只会让判定更保守：
+       剩 0 条 → 继续催；剩 >1 条 → 仍算无法确认，继续催。
+       万一真记录被误排除（台账日期填错），结果是继续催 —— 吵但安全。
+       **它不会造成「静默不催」**，那才是这个项目最怕的失败模式。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    raw = cfg.get("not_before")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("not_before 必须是对象")
+    local = raw.get("local_field")
+    target = raw.get("target_field")
+    for name, value in (("local_field", local), ("target_field", target)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"not_before 缺少 {name}")
+    return {"local_field": local.strip(), "target_field": target.strip()}
+
+
 def _validate_cross_refs(l: dict, rules: dict, known_ids: set) -> list[str]:
     """cross_ledger 指向的台账必须真实存在（字段是否存在要等读到表才知道）。"""
     errs: list[str] = []
@@ -276,6 +315,9 @@ def _validate_cross_refs(l: dict, rules: dict, known_ids: set) -> list[str]:
                 f"跨台账核对查不到目标台账时这个节点会永远催下去。")
         try:
             cross_match_fields(cross, l.get("name_field", "项目名称"))
+            # not_before 配错（比如只写了一半）不能等到次日 9:00 才发现 ——
+            # 它会让整条约束静默失效，而表现只是「怎么还在催」。
+            cross_not_before(cross)
         except ValueError as exc:
             errs.append(f"节点「{node}」的 cross_ledger 配置无效：{exc}")
     return errs
@@ -2371,17 +2413,28 @@ def _cross_identity(get_text, specs: list[dict], side: str) -> tuple[str, ...] |
     return tuple(values)
 
 
-def _cross_cache_key(lid: str, specs: list[dict]) -> tuple:
+def _cross_cache_key(lid: str, specs: list[dict], guard: dict | None) -> tuple:
     return (
         lid,
         tuple((spec["target_field"],
                tuple(sorted(spec["normalize_map"].items()))) for spec in specs),
+        # 🔴 guard 的目标列必须进缓存键：同一份目标台账被两个节点引用、
+        #    而只有一个配了 not_before 时，少了这一项两边会共用同一份索引，
+        #    其中一个拿到的日期列表是空的 —— 约束静默失效。
+        (guard or {}).get("target_field"),
     )
 
 
 def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict,
-                         default_local: str = "项目名称") -> tuple[dict, list[dict]]:
-    """建立目标责任范围内的联合身份索引，值为每个身份的命中次数。"""
+                         default_local: str = "项目名称"
+                         ) -> tuple[dict, list[dict], dict | None]:
+    """
+    建立目标责任范围内的联合身份索引。
+
+    值是**每个身份下各命中行的日期列表**（配了 not_before 时取那一列，
+    否则整列为 None）。以前只存一个计数 —— 那样拿不到任何时间信息，
+    也就没法排除「立项时间比需求提出还早」的行。
+    """
     lid = cfg.get("ledger_id")
     target = (all_ledgers or {}).get(lid)
     if target is None:
@@ -2392,11 +2445,12 @@ def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict,
         )
     try:
         specs = cross_match_fields(cfg, default_local)
+        guard = cross_not_before(cfg)
     except ValueError as exc:
         raise LedgerError(f"跨台账核对配置无效：{exc}") from exc
-    cache_key = _cross_cache_key(lid, specs)
+    cache_key = _cross_cache_key(lid, specs, guard)
     if cache_key in cache:
-        return cache[cache_key], specs
+        return cache[cache_key], specs, guard
 
     target_sheet = read_ledger_sheet(target)
     name_field = target.get("name_field", "项目名称")
@@ -2404,6 +2458,10 @@ def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict,
     required.update(spec["target_field"] for spec in specs)
     required.update(f.get("field") for f in target.get("scope_filters") or []
                     if f.get("field"))
+    if guard:
+        # 列不存在必须走下面那条致命错，不能当成「没查到」——
+        # 那会让约束静默失效，而表现只是「怎么还在催」。
+        required.add(guard["target_field"])
     for field in sorted(required):
         if not target_sheet.has_column(field):
             raise LedgerError(
@@ -2412,7 +2470,7 @@ def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict,
                 f"🔴 这不能当成「没查到」继续跑 —— 那会让这个节点永远催下去。"
             )
 
-    index: dict[tuple[str, ...], int] = {}
+    index: dict[tuple[str, ...], list] = {}
     for row in target_sheet.data_rows:
         target_get = lambda field, _row=row: target_sheet.text(_row, field)  # noqa: E731
         if not target_get(name_field):
@@ -2422,9 +2480,13 @@ def _cross_ledger_values(cfg: dict, all_ledgers: dict, cache: dict,
             continue
         identity = _cross_identity(target_get, specs, "target")
         if identity is not None:
-            index[identity] = index.get(identity, 0) + 1
+            # 日期取不到就存 None ——「不能证伪」的行必须保留为候选，
+            # 不许因为读不出日期就把它排除掉（那会让判定误停）。
+            when = (target_sheet.date(row, guard["target_field"])
+                    if guard else None)
+            index.setdefault(identity, []).append(when)
     cache[cache_key] = index
-    return index, specs
+    return index, specs, guard
 
 
 def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
@@ -2534,13 +2596,44 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
         # 不管是不是在阈值窗口内查到的：迟到也是到了，不该继续催。
         cross_cfg = current.get("cross_ledger")
         if cross_cfg:
-            index, specs = _cross_ledger_values(
+            index, specs, guard = _cross_ledger_values(
                 cross_cfg, all_ledgers or {}, cross_cache, name_field)
             identity = _cross_identity(get_text, specs, "local")
-            matches = index.get(identity, 0) if identity is not None else 0
+            hits = list(index.get(identity, ())) if identity is not None else []
+            raw = len(hits)
+
+            # 「时间不可能倒流」：目标行的日期早于本行的日期，就不可能是同一个
+            # 项目 —— 主台账里的项目是从这里推进过去的。见 cross_not_before()。
+            #
+            # 🔴 两处「不能证伪就不排除」：本行日期取不到 → 整条约束不生效；
+            #    目标行日期取不到（存的是 None）→ 该行保留为候选。
+            #    两者都倒向「继续催」，而不是「误判为已接力后静默不催」。
+            excluded = 0
+            if guard:
+                floor = get_date(guard["local_field"])
+                if floor is not None:
+                    kept = [d for d in hits if d is None or d >= floor]
+                    excluded = len(hits) - len(kept)
+                    hits = kept
+
+            matches = len(hits)
             if matches == 1:
                 target_name = (all_ledgers or {}).get(cross_cfg.get("ledger_id"), {}).get("name", cross_cfg.get("ledger_id"))
-                rep.advanced.append((key, name, f"已出现在「{target_name}」"))
+                # 业务口径④：判定结果要标明依据。靠时间排除才定下来的，
+                # 必须说出来，否则业务无从复核这一步对不对。
+                why = f"已出现在「{target_name}」"
+                if excluded:
+                    why += (f"（同名 {raw} 条，按「{guard['target_field']}"
+                            f"不早于{guard['local_field']}」排除 {excluded} 条）")
+                rep.advanced.append((key, name, why))
+                if excluded:
+                    # 🔴 `advanced` 在渲染层**只以计数出现**（「跨台账核对通过 N」），
+                    #    逐条理由不显示 —— 光把 why 塞进去等于没写。
+                    #    靠时间推断才定下来的，得能复核，所以另发一条 notice。
+                    #    notices 只进终端/日志渲染，**不进企微推送**：
+                    #    这条已经settled 的判定天天推给业务就是噪声，
+                    #    而排查的人看日志时需要它。
+                    rep.notices.append(f"{key} {name}：{why}")
                 continue
             if matches > 1:
                 rep.review_hints.append(
