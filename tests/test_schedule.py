@@ -88,6 +88,12 @@ class ScheduleConsistencyTest(unittest.TestCase):
             # 本文件的文档字符串里写着旧口径当反例，不能自己拿自己开刀
             if p.name == Path(__file__).name:
                 continue
+            # CHANGELOG 同理：它**记述**的正是「当初改成这个写法、后来发现错了」，
+            # 引用旧表达式是记录的一部分。为了绕过这条检查去改写历史记述，
+            # 会让变更记录变得含糊 —— 那比留着这行字更糟。
+            # 🔴 豁免只给这两个「以旧写法为叙述对象」的文件，别再往里加。
+            if p.name == "CHANGELOG.md":
+                continue
             for i, line in enumerate(
                     p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 for m in self.CRON.finditer(line):

@@ -26,15 +26,27 @@
   必读     → README / SKILL / KNOWN_ISSUES / SECURITY / VERSION
 
 按这条标准落选的：
-  · CHANGELOG.md —— 不服务上面任何一条。关键的行为变化已写进 KNOWN_ISSUES
-    的「已在 x.y.z 修复」，完整记录在 GitHub 仓库里
   · .gitignore —— 业务不用 git
+
+🔴 **CHANGELOG.md 曾经落选，2026-08-17 改回收录 —— 别再按旧理由删掉它。**
+
+  旧理由是「不服务上面任何一条，完整记录在 GitHub 仓库里」，看着成立，
+  但它默认了「不收录 == 生产目录里没有」。实际不是：
+
+    生产目录里躺着一份 2026-08-12 的旧副本，首条写着 `## 0.6.0-rc1`，
+    而同目录的 VERSION 已经是 0.6.0-rc9。bootstrap 按清单同步，
+    清单里没有它 → **永远不会被刷新**，于是它一直声称生产是 rc1。
+
+  2026-08-17 复查时就照着它误判了一次生产版本。
+  **一份会说谎的文件，比没有这份文件糟。** 收录它是最省事的堵法：
+  每次部署自动刷新，生产目录从此自己说得清自己是哪一版。
 """
 
 from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
 
 # 顶层文件。顺序无关，但保持字母序方便比对。
 TOP_FILES = (
+    "CHANGELOG.md",
     "KNOWN_ISSUES.md",
     "README.md",
     "SECURITY.md",

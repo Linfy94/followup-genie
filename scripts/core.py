@@ -1584,6 +1584,20 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
                 try:
                     for spec in cross_match_fields(cross, name_field):
                         referenced.add(spec["local_field"])
+                    # 🔴 not_before 的本地列也必须在这里 —— 漏了它，列名写错时
+                    #    get_date() 只会返回 None，约束整条**静默失效**、退回纯计数。
+                    #    实测过后果（同一份数据，只差列名一个字）：
+                    #      写对 → 老项目被排除 → 剩 0 条 → 继续催（正确）
+                    #      写错 → 约束失效   → 1 条命中 → 判为已接力、**停催**
+                    #    一个错别字就把「正确地继续催」变成「静默不催」，
+                    #    而这条约束存在的全部意义就是防这个。
+                    #
+                    #    只加 local_field：target_field 属于另一张台账，
+                    #    已由 _cross_ledger_values 那条致命错管着；
+                    #    在本地表上找它会得到一条必然误报的致命错。
+                    guard = cross_not_before(cross)
+                    if guard:
+                        referenced.add(guard["local_field"])
                 except ValueError:
                     pass  # validate_configs 已给出精确错误；避免这里二次裸崩
     for f in ledger.get("scope_filters") or []:

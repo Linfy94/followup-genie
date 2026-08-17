@@ -169,6 +169,55 @@ class CannotDisproveTest(unittest.TestCase):
 
 class MissingColumnTest(unittest.TestCase):
 
+    def test_local_guard_column_absent_is_fatal_not_silent(self):
+        """
+        🔴 rc9 漏了这一条，rc10 补上。本地日期列名写错时：
+             旧行为 → get_date() 返回 None → 约束**静默失效** → 退回纯计数
+                     → 这个例子里 1 条命中 → **判为已接力、停催**
+             新行为 → 入口断言拦下，拒绝继续判定
+
+           一个错别字把「正确地继续催」变成「静默不催」，而这条约束
+           存在的全部意义就是防这个。实测过两种结果，见提交信息。
+        """
+        src_sheet = FakeSheet(["企业名称", "状态", "进入时间"],
+                              [{"企业名称": "同名企业", "状态": "待登记",
+                                "进入时间": BASE}])
+        # 目标只有一条，且日期早于本行 —— 约束生效时它会被排除、继续催
+        tgt_sheet = FakeSheet(["企业名称", "立项时间"],
+                              [{"企业名称": "同名企业", "立项时间": EARLIER}])
+        src = base_ledger(id="src",
+                          required_columns=["企业名称", "状态", "进入时间"])
+        tgt = base_ledger(id="tgt", name="主台账",
+                          required_columns=["企业名称", "立项时间"])
+        ruleset = {"nodes": [{
+            "id": "wait_reg", "name": "待登记", "enabled": True,
+            "when": [{"field": "状态", "op": "equals", "value": "待登记"}],
+            "clock": {"field": "进入时间"},
+            "threshold": {"days": 3, "boundary": "on"},
+            "repeat": {"days": 1},
+            "cross_ledger": {
+                "ledger_id": "tgt",
+                "match_fields": [{"local_field": "企业名称",
+                                  "target_field": "企业名称"}],
+                # 本地列名写错（繁体「進入時間」）
+                "not_before": {"local_field": "進入時間",
+                               "target_field": "立项时间"}},
+        }]}
+        sheets = {"src": src_sheet, "tgt": tgt_sheet}
+        wd = core.WorkdayCalc({"exclude_weekends": True,
+                               "exclude_holidays": False}, None)
+        with mock.patch.object(core, "read_ledger_sheet",
+                               side_effect=lambda l: sheets[l["id"]]):
+            with self.assertRaises(core.LedgerError) as cm:
+                core.evaluate_ledger(src, ruleset, wd, TODAY, {}, {}, {},
+                                     all_ledgers={"src": src, "tgt": tgt})
+        self.assertIn("進入時間", str(cm.exception))
+
+    def test_correct_local_column_is_not_flagged(self):
+        """列名写对时一切照旧 —— 新校验不能误伤。"""
+        rep = _run([{"企业名称": "同名企业", "立项时间": EARLIER}])
+        self.assertIn("同名企业", _due(rep))
+
     def test_guard_column_absent_is_fatal_not_silent(self):
         """🔴 列不存在当成「没查到」继续跑，会让约束静默失效。"""
         src_sheet = FakeSheet(["企业名称", "状态", "进入时间"],
