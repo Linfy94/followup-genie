@@ -38,9 +38,16 @@ TEXT_SUFFIXES = {".md", ".py", ".json", ".jsonc", ".sh", ".txt", ".yml", ".yaml"
 # 🔴 检查器会扫到自己：`build_release.py` 里写的就是那条正则本身
 #    （几个公司后缀的或分支），于是它永远自我命中。
 #    这里也刻意不逐字抄那串后缀 —— 抄一遍，这个文件也会自我命中。
-#    只排除这一个文件，且**只排除它** —— 它是判据的定义处，
-#    不是客户数据会流经的地方。多排除一个文件，这道网就多一个洞。
-SELF = "scripts/build_release.py"
+#
+#    2026-08-18：生产树自己的历史里躺着好几份 `.upgrade-rollback-*/`
+#    回滚备份（铁律④留下的，不许删），每一份都带一份当时的
+#    `scripts/build_release.py`，同样会自我命中。按精确路径排除只挡得住
+#    当前这一份，历史备份份份都得手动加——这不叫「只排除一个文件」，
+#    是「排除清单会无限变长」。改成按「路径以 scripts/build_release.py
+#    结尾」匹配：判据定义处只会以这个相对路径出现，不管它是当前版本
+#    还是某次回滚备份里的旧版本，内容性质完全一样（都不是客户数据流经的地方）。
+def is_validator_definition(rel: str) -> bool:
+    return rel == "scripts/build_release.py" or rel.endswith("/scripts/build_release.py")
 
 
 def tracked_text_files() -> list[Path] | None:
@@ -65,7 +72,7 @@ def tracked_text_files() -> list[Path] | None:
         if not rel:
             continue
         p = ROOT / rel
-        if rel == SELF:
+        if is_validator_definition(rel):
             continue
         if p.suffix.lower() in TEXT_SUFFIXES and p.is_file():
             files.append(p)
@@ -103,9 +110,13 @@ class NoCustomerNamesTest(unittest.TestCase):
                         "判据认不出组织名了，这条测试就什么都证明不了")
 
     def test_only_the_validator_itself_is_exempt(self):
-        """🔴 白名单式排除最容易越长越大。钉住它只有一个。"""
+        """🔴 白名单式排除最容易越长越大。钉住豁免规则只认「判据定义处」。"""
         import test_no_customer_names_in_repo as mod
-        self.assertEqual(mod.SELF, "scripts/build_release.py")
+        self.assertTrue(mod.is_validator_definition("scripts/build_release.py"))
+        self.assertTrue(mod.is_validator_definition(
+            ".upgrade-rollback-20260817-102210/scripts/build_release.py"))
+        self.assertFalse(mod.is_validator_definition("scripts/core.py"))
+        self.assertFalse(mod.is_validator_definition("notes/build_release.py"))
 
     def test_no_tracked_file_carries_a_real_customer_name(self):
         files = tracked_text_files()
