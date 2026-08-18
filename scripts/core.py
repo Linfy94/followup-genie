@@ -1655,16 +1655,9 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
             f"{key_field} 出现重复值：{', '.join(dupes)}。"
             f"重复主键会让两个项目共用一条催办状态，必须先在台账里改掉。"
         )
-    out_blank, out_dupes = _key_problems([r for r in rows if r not in set(scoped)])
-    if out_blank or out_dupes:
-        a.warnings.append(
-            f"{key_field} 在责任范围外还有 "
-            + "、".join(filter(None, [
-                f"{out_blank} 行空值" if out_blank else "",
-                f"{len(out_dupes)} 组重复值" if out_dupes else ""]))
-            + "。这些行本来就不催，所以不阻断运行；但若它们哪天进了责任范围，"
-              "会立刻变成致命错误。"
-        )
+    # 🔴 2026-08-18 业务决定：责任范围外的条目不告警，只报责任范围内的问题。
+    #    range 外空主键/重复主键伤不到任何判定（P0-2 注释已说明），
+    #    所以不再统计、不再提示 —— 之前的「预警」用途由业务口径本身取代。
 
     # ── P0-3 的护栏：日期断言 ──
     date_fields = set()
@@ -1686,7 +1679,6 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     #
     #    终止行也要排除：已交付/已关闭的项目，日期填没填都不影响任何判定。
     #    舆情那 5 行「解析不出」全是「已交付」、值只是个 '2026'，报它没有意义。
-    scoped_set = set(scoped)
     terminal_conds = ledger.get("terminal_states") or []
 
     def _is_terminal(r: int) -> bool:
@@ -1764,20 +1756,11 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
                     f"这些行在依赖该列的节点上会被跳过。"
                     f"常见原因：该列实际是关联/引用字段，读到的是记录 ID 而不是日期。"
                 )
-        # 范围外的只聚合成一句，不点名 —— 它们现在不催，但哪天进了责任范围
-        # 就会立刻变成上面那两条。丢掉这句等于丢掉预警（同 1572 行那条的路子）。
-        out_bad = sum(1 for r in rows
-                      if r not in scoped_set and sheet.date(r, f) is None
-                      and sheet.text(r, f))
-        if out_bad:
-            a.warnings.append(
-                f"{f} 在责任范围外还有 {out_bad} 行解析不出日期。"
-                f"这些行本来就不催，所以不逐条点名；"
-                f"但它们哪天进了责任范围，就会变成上面那种问题。"
-            )
+        # 🔴 2026-08-18 业务决定：责任范围外的条目不告警。
+        #    这些行本来就不进催办流程，日期解不解析都不影响任何判定。
         today = date.today()
         future = [
-            row_key(sheet, r, kfields) for r in rows
+            row_key(sheet, r, kfields) for r in live
             if (d := sheet.date(r, f)) and d > today
         ]
         if future:

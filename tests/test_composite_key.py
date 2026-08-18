@@ -175,8 +175,9 @@ class ScopeAwareKeyAssertionTest(unittest.TestCase):
     2026-08-10 实测：GEO 表有 4 行把「提问关键词」误填进了企业列
     （无序号、无分行），责任范围内 0 行，却让整份 132 行的台账读不了。
 
-    但降级**不能变成静默放行**：范围外的问题照样每天出现在数据质量警告里，
-    而真正的系统性读失败（整列读成空串）必然同时命中范围内的行，仍然致命。
+    2026-08-18 业务决定：责任范围外的条目不再告警（此前会以「责任范围外
+    还有 N 行…」的形式提示，业务反馈这类噪声没有意义 —— 反正不催）。
+    真正的系统性读失败（整列读成空串）必然同时命中范围内的行，仍然致命。
     """
 
     def _assert(self, rows):
@@ -191,13 +192,14 @@ class ScopeAwareKeyAssertionTest(unittest.TestCase):
         return {"序号": num, "企业": name, "分行": branch,
                 "已发货": "", "进入时间": TODAY}
 
-    def test_blank_key_outside_scope_is_a_warning_not_fatal(self):
+    def test_blank_key_outside_scope_is_not_fatal_and_not_warned(self):
+        """2026-08-18 业务决定：责任范围外的条目不告警，只是不致命。"""
         a = self._assert([
             self._row("1", "甲公司", "杭州分行"),
             self._row("", "提问关键词误填进企业列", ""),      # 范围外、没序号
         ])
         self.assertEqual([e for e in a.fatal if "空值" in e], [])
-        self.assertTrue(any("责任范围外" in w for w in a.warnings), a.warnings)
+        self.assertEqual([w for w in a.warnings if "责任范围外" in w], [])
 
     def test_blank_key_inside_scope_is_still_fatal(self):
         """护栏的力度一点没减：范围内的空主键照样拦死。"""
@@ -213,14 +215,14 @@ class ScopeAwareKeyAssertionTest(unittest.TestCase):
                           self._row("", "乙公司", "杭州分行")])
         self.assertTrue(any("空值" in e for e in a.fatal), a.fatal)
 
-    def test_duplicate_outside_scope_is_a_warning(self):
+    def test_duplicate_outside_scope_is_not_fatal_and_not_warned(self):
         a = self._assert([
             self._row("1", "甲公司", "杭州分行"),
             self._row("9", "丙公司", "北京分行"),
             self._row("9", "丙公司", "北京分行"),
         ])
         self.assertEqual([e for e in a.fatal if "重复值" in e], [])
-        self.assertTrue(any("责任范围外" in w for w in a.warnings), a.warnings)
+        self.assertEqual([w for w in a.warnings if "责任范围外" in w], [])
 
     def test_duplicate_inside_scope_is_still_fatal(self):
         a = self._assert([
