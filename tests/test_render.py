@@ -60,6 +60,51 @@ def _reports(sheet, cfg):
     return [rep]
 
 
+def _reports_with(rules, sheet, cfg):
+    """同 _reports，但允许换一份 rules（用来造停用节点）。"""
+    import qqdoc
+    from unittest import mock
+    led = ledgers_cfg()["ledgers"][0]
+    wd = core.WorkdayCalc(rules["workday"], None)
+    with mock.patch.object(qqdoc, "read_sheet", lambda *a: sheet):
+        rep, _ = core.evaluate_ledger(led, rules["rulesets"]["box"], wd,
+                                      TODAY, {}, {}, {}, {})
+    return [rep]
+
+
+class DisabledNodeChannelTest(unittest.TestCase):
+    """
+    停用节点的「⏸ 未启用」提示：**不进企微，但必须留在终端**（2026-08-18 业务决定）。
+
+    两半都要断言，缺一半这条测试就守不住东西：
+      · 只断言「企微里没有」→ 把三处渲染全删光也能绿，
+        那就把「一个悄悄不跑的规则比一个跑错的规则更难发现」这条安全属性丢了；
+      · 只断言「终端里有」→ 本轮的改动等于没测。
+    """
+
+    def setUp(self):
+        self.cfg = output_cfg()
+        rules = rules_cfg(collect={"enabled": False})
+        # 这批行本来正好卡在①收资，节点一停用就都落不到任何节点上 ——
+        # 正是生产里那 6 个「待收资」项目的处境。
+        self.reps = _reports_with(rules, collect_rows([26, 78, 81]), self.cfg)
+        self.md = check_followup.render_wecom(self.reps, TODAY, self.cfg)
+        self.txt = check_followup.render(self.reps, TODAY, False, self.cfg)
+
+    def test_the_fixture_really_has_a_disabled_node(self):
+        """先证明造出来的确实是停用场景，否则下面两条都是空跑。"""
+        self.assertTrue(self.reps[0].disabled_nodes,
+                        "fixture 没造出停用节点，后两条断言证明不了任何东西")
+
+    def test_wecom_push_does_not_mention_it(self):
+        self.assertNotIn("未启用", self.md,
+                         f"停用节点不该再推给业务：\n{self.md}")
+
+    def test_terminal_output_still_announces_it(self):
+        self.assertIn("未启用", self.txt,
+                      "终端仍要明说 —— 安全属性只是换通道，不是取消")
+
+
 class OrderingTest(unittest.TestCase):
 
     def test_items_are_ascending_by_overdue_days(self):

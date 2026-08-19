@@ -582,10 +582,22 @@ def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
             for p in problems:
                 L.append(f"- {p}")
 
-        for report in section.reports:
-            for disabled in report.disabled_nodes:
-                L.append("")
-                L.append(f"> ⏸ {disabled.split('：')[0]}：未启用，不会产生催办")
+        # 🔴 停用节点**不进企微推送**（2026-08-18 业务决定）。
+        #
+        #    这行原本每天推给业务，用意是「明说不催，不是悄悄消失」——
+        #    而它确实起过作用：盒子线①收资从 08-10 停用起，每天推这一行，
+        #    最后正是业务看到它才给出了「这个节点不再提示」的定论。
+        #    **但定论一给，这行的用途就用完了**：一个明确不催的节点，
+        #    业务这边没有任何可动手的事，再推就是每天一条噪声。
+        #    与同日「责任范围外不告警」是同一条理由。
+        #
+        #    ⚠️ 安全属性没有丢，只是换了通道 —— 「一个悄悄不跑的规则比一个
+        #    跑错的规则更难发现」这条仍然成立，由三处守着，都不经企微：
+        #      · 终端输出（_render_report_tail，每次运行都打）
+        #      · --verbose 运行摘要
+        #      · doctor 自检里那条 WARN（部署七步必跑，且它直接读配置，
+        #        不依赖本函数，所以改这里动不到它）
+        #    --json 的 disabled_nodes 字段也原样保留，diff_due 照常能比。
 
     return "\n".join(L)
 
