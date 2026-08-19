@@ -27,7 +27,8 @@ import sys
 import unittest
 from unittest import mock
 
-from harness import temp_home, ledgers_cfg, rules_cfg, state_files
+from harness import (temp_home, ledgers_cfg, rules_cfg, state_files,
+                     run_doctor)
 
 import core
 import doctor
@@ -201,5 +202,46 @@ class ReadOnlyTest(unittest.TestCase):
             self.assertNotIn("试探.json", state_files(home))
 
 
+class DisabledReasonShownInDoctorTest(unittest.TestCase):
+    """
+    停用节点的理由必须在 `doctor --validate-config` 里说得出来。
+
+    🔴 2026-08-18 起「⏸ 未启用」不再进企微推送，**doctor 成了这条信息的主通道**。
+       主通道说不出理由就失去了意义 —— 而配置里两种键名都在用
+       （`_禁用原因` / `_停用说明`），doctor 原本只认前者，
+       于是盒子线①收资那份写得最详细的停用依据反而打不出来，
+       只剩通用兜底「配置里 enabled=false」。
+
+    ⚠️ 第一版这条测试写错了：拿 `doctor --values`（枚举列取值）去测，
+       那是另一条代码路径，根本不经过这里 —— 新旧代码上都红。
+       坑 #11 的近亲：**测试必须真的打在被改的那段上**。
+    """
+
+    def _doctor_out(self, key: str | None) -> str:
+        rules = rules_cfg()
+        for n in rules["rulesets"]["box"]["nodes"]:
+            if n["id"] == "collect":
+                n["enabled"] = False
+                if key:
+                    n[key] = f"标记理由-{key}"
+        with temp_home(rules=rules):
+            _, out = run_doctor(["--validate-config"])
+        return out
+
+    def test_reason_key_禁用原因_is_shown(self):
+        self.assertIn("标记理由-_禁用原因", self._doctor_out("_禁用原因"))
+
+    def test_reason_key_停用说明_is_shown(self):
+        """旧代码上是真红：`_停用说明` 被忽略，只打通用兜底。"""
+        self.assertIn("标记理由-_停用说明", self._doctor_out("_停用说明"))
+
+    def test_without_any_reason_it_still_says_something(self):
+        """两个键都没有时仍要有兜底，不能打出空白。"""
+        out = self._doctor_out(None)
+        self.assertIn("未启用", out)
+        self.assertIn("enabled=false", out)
+
+
 if __name__ == "__main__":
     unittest.main()
+

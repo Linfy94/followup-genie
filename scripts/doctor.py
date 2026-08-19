@@ -199,9 +199,17 @@ def check_configs(doc: Doc) -> tuple[dict, dict, dict] | None:
         doc.add(OK, f"规则集「{l.get('ruleset')}」：{len(on)} 个节点启用",
                 "、".join(n.get("name", "?") for n in on))
         # 禁用的节点必须显式列出 —— 一个悄悄不跑的规则比一个跑错的规则更难发现
+        #
+        # 🔴 两种拼法都要认。配置里实际存在 `_禁用原因` 与 `_停用说明` 两个键，
+        #    而这里原本只读前者 —— 于是盒子线①收资那段写得最详细的停用依据
+        #    （含业务 2026-08-18「永久取消、不要再改回 true」的定论）
+        #    在 doctor 里根本看不到，只打通用的「配置里 enabled=false」。
+        #    2026-08-18 起「⏸ 未启用」不再进企微推送，**doctor 成了这条信息的主通道**，
+        #    主通道说不出理由就失去了意义，所以这里必须两种都读。
         for n in off:
             doc.add(WARN, f"节点「{n.get('name')}」未启用（不会产生任何催办）",
-                    n.get("_禁用原因") or "配置里 enabled=false")
+                    n.get("_禁用原因") or n.get("_停用说明")
+                    or "配置里 enabled=false")
         # 阈值与复提醒必填
         # 🔴 repeat 的检查**必须调 core 的那一份**，不许在这里再写一遍。
         #    自带一份的下场已经见过：它只认 days/workdays/weekday，
