@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `0.6.0-rc12` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
+> `0.6.0-rc13` · 业务内测版。Hermes + macOS 已实测；WorkBuddy 当前工作空间安装已完成隔离测试，仍待业务电脑实测。
 
 ## 给业务：只复制下面这一段
 
@@ -304,7 +304,7 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test       
 ⚠️ `holidays.json` 是全项目唯一需要人工年度维护的东西（国务院调休无法用规则推算）。
 过期时 `doctor` 会报警，**不会静默降级**。
 
-✅ **0.6.0-rc12 首次安装已自带核对过的 2026 年预设**：33 个放假日、6 个补班日，
+✅ **0.6.0-rc13 首次安装已自带核对过的 2026 年预设**：33 个放假日、6 个补班日，
 `covers_year: 2026`、`verified: true`。升级时如已有 `holidays.json`，`setup.sh`
 会跳过并逐字节保留，绝不覆盖业务自己维护的日期。
 
@@ -320,7 +320,7 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test       
 
 ### 从业务预设接入台账
 
-包内 `templates/presets/ai-box-sentinel/` 提供 AI 节能盒子与 AI 哨兵的脱敏示例，
+包内 `templates/presets/ai-box-sentinel/` 提供 AI 节能盒子与 AI 安全员的脱敏示例，
 保留节点、阈值、字段口径及「企业名称 + 分行」跨台账联合匹配。
 Agent 应从预设复制配置，一次只问一个业务问题，补齐地址、字段和责任范围；
 不得把预设内的占位文字当成真实配置。
@@ -366,7 +366,7 @@ FOLLOWUP_HOME=<目录> python3 scripts/check_followup.py
 
 ## 已知边界
 
-见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.6.0-rc12` 的主要限制：
+见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。当前 `0.6.0-rc13` 的主要限制：
 WorkBuddy 未实机验证、Windows 未验证、**外部存活监控已交付但默认未安装**。
 
 ---

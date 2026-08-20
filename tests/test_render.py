@@ -280,8 +280,22 @@ class WecomRenderTest(unittest.TestCase):
     def test_heading_levels_for_size(self):
         """「大一号字」靠标题分级实现 —— markdown_v2 没有字号语法。"""
         self.assertIn("# 🧚 项目跟进精灵", self.md)
-        self.assertIn("## AI节能盒子", self.md)
+        self.assertIn("## 🌟 AI节能盒子", self.md)
         self.assertIn("### 【待收资】", self.md)
+
+    def test_every_track_heading_has_a_star_in_wecom_only(self):
+        """
+        🌟 只加在企微推送（业务 2026-08-19 要求）。
+
+        断言两半：企微里每个赛道标题都带星，终端那份一颗都不该有 ——
+        只测前一半的话，把终端也顺手加了星也能绿，那就漏了「只加企微」这个约束。
+        """
+        for line in self.md.splitlines():
+            if line.startswith("## "):
+                self.assertTrue(line.startswith("## 🌟 "),
+                                f"企微赛道标题必须带🌟：{line}")
+        for line in self.txt.splitlines():
+            self.assertNotIn("🌟", line, f"终端输出不该出现🌟：{line}")
 
     def test_items_carry_no_styling(self):
         """业务否掉了「抬高其他项来反衬」：条目一律不加粗、不引用、不斜体。"""

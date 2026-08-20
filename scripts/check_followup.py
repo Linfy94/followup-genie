@@ -560,7 +560,10 @@ def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
     for section in merge_reports(reports):
         groups = group_items(section.items, output_cfg)
         L.append("")
-        L.append(f"## {section.label}")
+        # 🌟 只加在企微这份（业务 2026-08-19 要求）。终端那份（435 行）不加——
+        # 那份进日志，emoji 只会在纯文本排查时碍事，且两处刻意不共用一行拼接逻辑，
+        # 免得下次只改一头。
+        L.append(f"## 🌟 {section.label}")
         L.extend(_headline(section.in_scope, len(section.items), groups))
 
         for g in groups:
