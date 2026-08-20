@@ -288,6 +288,44 @@ def cross_not_before(cfg: dict) -> dict | None:
     return {"local_field": local.strip(), "target_field": target.strip()}
 
 
+def scope_after(ledger: dict) -> dict | None:
+    """
+    责任范围的「日期不早于」约束。没配就返回 None（保持原行为）。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 业务 2026-08-20 接 AI外贸拓客台账时提出：排除 2026-06 之前登记的
+       历史数据 —— 不是随口一说，实测过：不排除的话，2026-06 前、且在
+       杭州/深圳范围内的老数据里，39 条会被①客户填表误判成「没填联系方式」、
+       11 条会被②确认回报误判成「没立项」，全是早该收尾但台账没清的旧线索。
+
+    与 `not_before`（比较两个字段）不同，这条约束比较的是**一个字段 vs 一个
+    写死的日期常量**——语义更像 scope_filters 的「日期版」，所以判定结果
+    走同一个 out_of_scope 计数，不是终止、不是暂缓。
+
+    🔴 同样「不能证伪就不排除」：日期取不到（空/解析不出）时**不排除**，
+       让它按原有逻辑继续走 —— 宁可多催一条被人发现，也不能让数据质量问题
+       悄悄躲进「范围外」，那样连数据质量警告都不会显示。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    raw = ledger.get("scope_after")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("scope_after 必须是对象")
+    field = raw.get("field")
+    if not isinstance(field, str) or not field.strip():
+        raise ValueError("scope_after 缺少 field")
+    date_str = raw.get("date")
+    if not isinstance(date_str, str) or not date_str.strip():
+        raise ValueError("scope_after 缺少 date")
+    try:
+        cutoff = date.fromisoformat(date_str.strip())
+    except ValueError:
+        raise ValueError(
+            f"scope_after.date 不是合法日期（要 YYYY-MM-DD）：{date_str!r}")
+    return {"field": field.strip(), "date": cutoff}
+
+
 def _validate_cross_refs(l: dict, rules: dict, known_ids: set) -> list[str]:
     """cross_ledger 指向的台账必须真实存在（字段是否存在要等读到表才知道）。"""
     errs: list[str] = []
@@ -370,6 +408,13 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
             errs.extend(condition_errors(
                 l.get("scope_filters"),
                 f"台账「{l.get('name') or l.get('id') or i + 1}」的 scope_filters"))
+            # scope_after 配错（比如日期格式不对）不能等到次日 9:00 才发现 ——
+            # 它跟 scope_filters 一样，一旦失效就静默变成「今天没有要催的」。
+            try:
+                scope_after(l)
+            except ValueError as exc:
+                errs.append(
+                    f"台账「{l.get('name') or l.get('id') or i + 1}」的 scope_after 配置无效：{exc}")
 
         # cross_ledger 的引用必须指向真实存在的台账。指错了只有跑到那个节点
         # 才炸，而那可能是几天后的事；能离线查出来就不该留到线上。
@@ -1497,13 +1542,14 @@ def check_manual_lists(sheet: qqdoc.Sheet, ledger: dict) -> Assertions:
     """
     a = Assertions()
     kfields = key_fields(ledger)
+    ktiebreakers = key_tiebreakers(ledger)
     key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
 
     # 台账当前的 序号 → 企业名
     live: dict[str, str] = {}
     for r in sheet.data_rows:
-        k = row_key(sheet, r, kfields)
+        k = row_key(sheet, r, kfields, ktiebreakers)
         n = sheet.text(r, name_field)
         if k and n:
             live[k] = n
@@ -1550,6 +1596,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     """
     a = Assertions()
     kfields = key_fields(ledger)
+    ktiebreakers = key_tiebreakers(ledger)
     key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
 
@@ -1603,6 +1650,12 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     for f in ledger.get("scope_filters") or []:
         if f.get("field"):
             referenced.add(f["field"])
+    try:
+        sa = scope_after(ledger)
+        if sa:
+            referenced.add(sa["field"])
+    except ValueError:
+        pass  # validate_configs 已给出精确错误；避免这里二次裸崩
     for t in ledger.get("terminal_states") or []:
         if t.get("field"):
             referenced.add(t["field"])
@@ -1635,12 +1688,25 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     #    照样每天显示。而真正的系统性读失败（整列读成空串）必然同时命中
     #    范围内的行 —— 那时仍然是致命，护栏的力度一点没减。
     rows = [r for r in sheet.data_rows if sheet.text(r, name_field)]
+    sa = None
+    try:
+        sa = scope_after(ledger)
+    except ValueError:
+        pass  # validate_configs 已给出精确错误；这里不许二次裸崩
+
+    def _passes_scope_after(r: int) -> bool:
+        if not sa:
+            return True
+        d = sheet.date(r, sa["field"])
+        return d is None or d >= sa["date"]  # 取不到日期就不排除（不能证伪就不排除）
+
     scoped = [r for r in rows
               if all(match_condition(lambda f, _r=r: sheet.text(_r, f), c)
-                     for c in (ledger.get("scope_filters") or []))]
+                     for c in (ledger.get("scope_filters") or []))
+              and _passes_scope_after(r)]
 
     def _key_problems(subset: list[int]) -> tuple[int, list[str]]:
-        ks = [row_key(sheet, r, kfields) for r in subset]
+        ks = [row_key(sheet, r, kfields, ktiebreakers) for r in subset]
         return (sum(1 for k in ks if not k),
                 sorted({k for k in ks if k and ks.count(k) > 1}))
 
@@ -1720,7 +1786,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
             if sheet.date(r, f) is not None:
                 continue
             (blank if not sheet.text(r, f) else unparsable).append(
-                row_key(sheet, r, kfields))
+                row_key(sheet, r, kfields, ktiebreakers))
         if blank:
             a.warnings.append(
                 f"{f} 有 {len(blank)} 行为空（{', '.join(blank[:8])}"
@@ -1760,7 +1826,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         #    这些行本来就不进催办流程，日期解不解析都不影响任何判定。
         today = date.today()
         future = [
-            row_key(sheet, r, kfields) for r in live
+            row_key(sheet, r, kfields, ktiebreakers) for r in live
             if (d := sheet.date(r, f)) and d > today
         ]
         if future:
@@ -2034,15 +2100,54 @@ def key_fields(ledger: dict) -> list[str]:
     return []
 
 
-def row_key(sheet, row: int, fields: list[str]) -> str:
+def key_tiebreakers(ledger: dict) -> list[str]:
+    """
+    可选的「消歧字段」，跟 key_field 是两回事：**有值才拼进主键，没值不影响**。
+
+    🔴 2026-08-20 接 AI外贸拓客台账实测：同一家企业、同一机构、同一天，
+       业务确认过某个真实客户会有多个不同方向的项目并行
+       跟进——两条记录唯一的区别是「目标国家地区」（一个欧洲、一个日本）。
+       但这一列**同时也是①客户填表节点要催的东西**：全新线索本来就还没填。
+       把它塞进 key_field（必填），会让最该被催的那批因为空主键报致命错；
+       不塞，同一天并行的多个项目就会撞车、共用一条催办状态。
+
+       两难的根源是同一个字段身兼两职：**有值时是消歧信息，没值时是
+       "待催办"的信号本身**。key_field 的「任一段为空就整个作废」这条
+       规则对它不适用，需要另一种语义：能区分就区分，不能区分不算错。
+
+    跟 key_field 一样支持标量或数组写法，不另起一套。
+    """
+    raw = ledger.get("key_tiebreakers")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw] if raw.strip() else []
+    if isinstance(raw, list):
+        return [f for f in raw if isinstance(f, str) and f.strip()]
+    return []
+
+
+def row_key(sheet, row: int, fields: list[str], tiebreakers: list[str] | None = None) -> str:
     """
     一行的主键值。组合键用 `|` 连接。
 
     🔴 任一段为空就整个返回空 —— 让入口断言的「主键读到空值」抓住它，
        而不是拼出一个 "|甲公司" 这样两行可能撞上的半截键。
+
+    tiebreakers（可选）：只在**有值**时追加到 key 末尾帮助消歧；
+    留空不影响 —— 它解决的是「必填字段相同时还能不能分清是哪一行」，
+    不是「这行到底有没有主键」，所以不参与「任一段为空就整个作废」那条规则。
+    分隔符跟主 key 的 `|` 不同（用 `‖`），避免两种字段的值凑巧撞在一起。
     """
     parts = [sheet.text(row, f) for f in fields]
-    return "|".join(parts) if all(parts) else ""
+    if not all(parts):
+        return ""
+    key = "|".join(parts)
+    for f in (tiebreakers or []):
+        v = sheet.text(row, f)
+        if v:
+            key += f"‖{v}"
+    return key
 
 
 def key_label(fields: list[str]) -> str:
@@ -2527,6 +2632,7 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
             )
 
     kfields = key_fields(ledger)
+    ktiebreakers = key_tiebreakers(ledger)
     key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
     paused_map = {str(p.get("key")): p.get("reason", "") for p in (ledger.get("paused") or [])}
@@ -2538,11 +2644,15 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
     snapshot: dict[str, str] = {}
     rows = [r for r in sheet.data_rows if sheet.text(r, name_field)]
     rep.total_rows = len(rows)
+    # scope_after(ledger) 已在 assert_sheet 里校验过（config 就是同一个 ledger），
+    # 走到这里必然合法，不必再 try/except —— 那道 gate 已经在 evaluate_ledger
+    # 开头把 not a.ok 的情况挡在了这个循环之前。
+    sa = scope_after(ledger)
 
     for r in rows:
         get_text = lambda f, _r=r: sheet.text(_r, f)  # noqa: E731
         get_date = lambda f, _r=r: sheet.date(_r, f)  # noqa: E731
-        key = row_key(sheet, r, kfields)
+        key = row_key(sheet, r, kfields, ktiebreakers)
         name = sheet.text(r, name_field)
 
         # 1) 责任范围：范围外的行压根不进催办流程
@@ -2554,6 +2664,14 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
                 rep.out_of_scope_detail[label] = rep.out_of_scope_detail.get(label, 0) + 1
                 skipped = True
                 break
+        if not skipped and sa:
+            d = get_date(sa["field"])
+            # 取不到日期就不排除（不能证伪就不排除，同 P0-2 那条护栏一个道理）
+            if d is not None and d < sa["date"]:
+                rep.out_of_scope += 1
+                label = f"{sa['field']}早于{sa['date'].isoformat()}"
+                rep.out_of_scope_detail[label] = rep.out_of_scope_detail.get(label, 0) + 1
+                skipped = True
         if skipped:
             continue
 

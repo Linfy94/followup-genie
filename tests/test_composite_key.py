@@ -98,6 +98,97 @@ class RowKeyTest(unittest.TestCase):
 
     def test_label_reads_like_the_config(self):
         self.assertEqual(core.key_label(["序号", "企业"]), "序号+企业")
+
+
+class TieBreakerNormalizeTest(unittest.TestCase):
+    """key_tiebreakers 的宽松解析，跟 key_fields 是同一套路子。"""
+
+    def test_absent_is_empty(self):
+        self.assertEqual(core.key_tiebreakers({}), [])
+
+    def test_single_string(self):
+        self.assertEqual(core.key_tiebreakers({"key_tiebreakers": "目标国家地区"}),
+                         ["目标国家地区"])
+
+    def test_array_form(self):
+        self.assertEqual(
+            core.key_tiebreakers({"key_tiebreakers": ["目标国家地区", "机构"]}),
+            ["目标国家地区", "机构"])
+
+    def test_junk_is_dropped_defensively(self):
+        for junk in (None, 7, [], ["", "  "], [3, "目标国家地区"]):
+            with self.subTest(junk=junk):
+                core.key_tiebreakers({"key_tiebreakers": junk})  # 不抛异常即可
+
+
+class TieBreakerRowKeyTest(unittest.TestCase):
+    """
+    key_tiebreakers：有值才拼进主键帮助消歧，没值完全不影响。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-20 接 AI外贸拓客台账实测：某个真实客户同一天
+       有多个不同方向的项目并行跟进（企业+机构+访客需求时间三者全同），
+       业务确认「每一行都是不同的项目」——不能挑一条留、也不能都不追踪。
+       唯一能区分的字段是「目标国家地区」，但它同时是①客户填表节点要催
+       的东西：全新线索这一列本来就是空的。塞进 key_field（必填）会让
+       最该被催的新线索因为空主键报致命错；不塞，同一天并行的项目会撞车。
+    ═══════════════════════════════════════════════════════════════════
+    """
+
+    def _sheet(self, rows):
+        return FakeSheet(["企业", "机构", "访客时间", "目标国家地区"], rows)
+
+    def test_tiebreaker_present_disambiguates_otherwise_identical_rows(self):
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "欧洲"},
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "日本"},
+        ])
+        k1 = core.row_key(s, 1, ["企业", "机构", "访客时间"], ["目标国家地区"])
+        k2 = core.row_key(s, 2, ["企业", "机构", "访客时间"], ["目标国家地区"])
+        self.assertNotEqual(k1, k2)
+        self.assertTrue(k1 and k2, "两边都该有值，不该因为加了消歧字段反而变空")
+
+    def test_tiebreaker_blank_does_not_blank_the_key(self):
+        """🔴 这条是本能力存在的全部意义：消歧字段没填，主键不能因此作废。"""
+        s = self._sheet([
+            {"企业": "乙公司", "机构": "深圳分行", "访客时间": "46200",
+             "目标国家地区": ""},
+        ])
+        k = core.row_key(s, 1, ["企业", "机构", "访客时间"], ["目标国家地区"])
+        self.assertEqual(k, "乙公司|深圳分行|46200")
+
+    def test_without_tiebreaker_configured_nothing_changes(self):
+        """不传 tiebreakers（默认 None）时，行为必须跟这个能力出现之前完全一样。"""
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "欧洲"},
+        ])
+        self.assertEqual(core.row_key(s, 1, ["企业", "机构", "访客时间"]),
+                         "甲公司|杭州分行|46202")
+
+    def test_still_collides_when_tiebreaker_is_also_blank_on_both_sides(self):
+        """
+        消歧字段帮不上忙时（两行都没填），不能假装分开了 ——
+        真撞车就该被撞车检测抓住，这条能力不许把它悄悄摸平。
+        """
+        s = self._sheet([
+            {"企业": "丙公司", "机构": "杭州分行", "访客时间": "46210",
+             "目标国家地区": ""},
+            {"企业": "丙公司", "机构": "杭州分行", "访客时间": "46210",
+             "目标国家地区": ""},
+        ])
+        k1 = core.row_key(s, 1, ["企业", "机构", "访客时间"], ["目标国家地区"])
+        k2 = core.row_key(s, 2, ["企业", "机构", "访客时间"], ["目标国家地区"])
+        self.assertEqual(k1, k2, "两边消歧字段都是空的，就该继续撞车，不该被强行分开")
+
+    def test_separator_does_not_collide_with_the_pipe(self):
+        """消歧字段用不同分隔符，避免跟必填段的 | 凑巧拼出同一个字符串。"""
+        s = self._sheet([{"企业": "甲", "机构": "乙", "访客时间": "1",
+                         "目标国家地区": "丙"}])
+        k = core.row_key(s, 1, ["企业", "机构", "访客时间"], ["目标国家地区"])
+        self.assertEqual(k, "甲|乙|1‖丙")
         self.assertEqual(core.key_label(["序号"]), "序号")
 
 

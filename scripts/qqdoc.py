@@ -24,6 +24,7 @@
 from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
 
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -185,26 +186,53 @@ def cell_text(cell: dict | None) -> str:
     return (cell.get("string_value") or "").strip()
 
 
+_TEXT_DATE_RE = re.compile(r"^(\d{4})/(\d{1,2})/(\d{1,2})$")
+
+
 def cell_date(cell: dict | None) -> date | None:
     """
     取单元格的日期值。
 
-    P0-3：cells 模式下日期是 serial number，不是字符串。用 serial 自己转，
+    P0-3：cells 模式下日期通常是 serial number，不是字符串。用 serial 自己转，
           完全不受单元格显示格式影响——业务把格式改成「3月31日」也不会挂。
+
+    🔴 2026-08-20 接 AI外贸拓客台账实测：同一列「访客/需求时间」里，
+       210/1312 行（16%）是 STRING 类型、内容形如 "2025/9/16"——不是
+       cells 模式该有的样子，本文件头部 P0-3 注释原话是「CSV 模式下才是
+       这种字符串」，但这批行确实是 STRING 类型，大概率是手工录入或
+       旧版 RPA 导入时绕开了日期选择器。206/210 能解析出年月日，
+       **全部**早于 2026-06——不是随机噪声，是一整批同源的历史数据。
+
+       只认 "YYYY/M/D" 这一种**无歧义**格式（年在前，斜杠分隔，不猜
+       "M/D/YYYY" 这类会跟中国以外习惯冲突的写法），业务 2026-08-20
+       确认要推广到所有腾讯文档台账，不只这一条线——这条护栏迟早会在
+       别的台账上复现同一种「手工录入绕开日期选择器」的模式。
     """
-    if not cell or cell.get("value_type") != "NUMBER":
+    if not cell:
         return None
-    n = cell.get("number_value")
-    if n is None:
-        return None
-    try:
-        days = int(n)
-    except (TypeError, ValueError):
-        return None
-    # 合理性护栏：serial 太小或太大说明这列不是日期
-    if not (20000 < days < 80000):  # 约 1954-10 ~ 2119-01
-        return None
-    return SERIAL_EPOCH + timedelta(days=days)
+    vt = cell.get("value_type")
+    if vt == "NUMBER":
+        n = cell.get("number_value")
+        if n is None:
+            return None
+        try:
+            days = int(n)
+        except (TypeError, ValueError):
+            return None
+        # 合理性护栏：serial 太小或太大说明这列不是日期
+        if not (20000 < days < 80000):  # 约 1954-10 ~ 2119-01
+            return None
+        return SERIAL_EPOCH + timedelta(days=days)
+    if vt == "STRING":
+        m = _TEXT_DATE_RE.match((cell.get("string_value") or "").strip())
+        if not m:
+            return None
+        y, mo, d = (int(x) for x in m.groups())
+        try:
+            return date(y, mo, d)
+        except ValueError:
+            return None  # 形状对但不是合法日期（比如 2025/13/40），不猜
+    return None
 
 
 class Sheet:
