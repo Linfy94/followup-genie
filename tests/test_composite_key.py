@@ -24,7 +24,7 @@ import unittest
 from datetime import date
 from unittest import mock
 
-from harness import core
+from harness import core, ledgers_cfg, rules_cfg
 
 from test_sentinel_rules import FakeSheet, base_ledger
 
@@ -101,7 +101,15 @@ class RowKeyTest(unittest.TestCase):
 
 
 class TieBreakerNormalizeTest(unittest.TestCase):
-    """key_tiebreakers 的宽松解析，跟 key_fields 是同一套路子。"""
+    """
+    key_tiebreakers 的解析。
+
+    🔴 2026-08-21 复审发现：非法值（数字/对象/混合数组）原来会被静默过滤
+    成空列表——配置打错，消歧功能悄悄不生效，等真撞车了才在运行时暴露成
+    主键重复的致命错，那时完全看不出根因在这里。改成非法输入直接报错，
+    这条测试类原来叫 test_junk_is_dropped_defensively、断言「不抛异常即可」，
+    这次连同行为一起改。
+    """
 
     def test_absent_is_empty(self):
         self.assertEqual(core.key_tiebreakers({}), [])
@@ -115,10 +123,28 @@ class TieBreakerNormalizeTest(unittest.TestCase):
             core.key_tiebreakers({"key_tiebreakers": ["目标国家地区", "机构"]}),
             ["目标国家地区", "机构"])
 
-    def test_junk_is_dropped_defensively(self):
-        for junk in (None, 7, [], ["", "  "], [3, "目标国家地区"]):
-            with self.subTest(junk=junk):
-                core.key_tiebreakers({"key_tiebreakers": junk})  # 不抛异常即可
+    def test_empty_array_is_fine(self):
+        self.assertEqual(core.key_tiebreakers({"key_tiebreakers": []}), [])
+
+    def test_blank_string_scalar_means_not_configured(self):
+        """单个空白字符串标量，跟 key_field 的既有宽容度一致：当没配。"""
+        self.assertEqual(core.key_tiebreakers({"key_tiebreakers": "  "}), [])
+
+    def test_non_string_scalar_errors(self):
+        """🔴 这几种在旧实现里会静默变成 []，新实现要报错。"""
+        with self.assertRaises(ValueError):
+            core.key_tiebreakers({"key_tiebreakers": 7})
+        with self.assertRaises(ValueError):
+            core.key_tiebreakers({"key_tiebreakers": {"a": 1}})
+
+    def test_array_with_non_string_element_errors(self):
+        with self.assertRaises(ValueError):
+            core.key_tiebreakers({"key_tiebreakers": [3, "目标国家地区"]})
+
+    def test_array_with_blank_string_element_errors(self):
+        """数组里每一项都该是精心列出的字段名，空字符串大概率是笔误。"""
+        with self.assertRaises(ValueError):
+            core.key_tiebreakers({"key_tiebreakers": ["", "  "]})
 
 
 class TieBreakerRowKeyTest(unittest.TestCase):
@@ -331,5 +357,150 @@ class ScopeAwareKeyAssertionTest(unittest.TestCase):
         l["name_field"] = "企业"
         a = core.assert_sheet(s, l, ruleset())
         self.assertTrue(any("空值" in e for e in a.fatal), a.fatal)
+
+
+class ResolveRowKeysTest(unittest.TestCase):
+    """
+    resolve_row_keys()：tiebreakers 只在真的撞车时才参与 key。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-21 复审发现：直接给 row_key() 传 tiebreakers 会让 key 随
+    消歧字段的值漂移——消歧字段（比如「目标国家地区」）往往是业务后填的，
+    项目推进一步、这一列从空变有值，key 就跟着变，state_key 也跟着变，
+    旧的 stage_entered / followup_state 记录在新 key 下查不到，项目被
+    当成从没出现过，可能重发一次首次催办。
+
+    实测复现：一个仍在静默期里的项目，只因为消歧字段被填上，第二天就
+    重新进了待催清单。下面两条是这次修复要守住的两头：
+      · 不撞车时，消歧字段怎么变，key 都不该变（这条测试要能在旧实现上
+        真的翻红——旧实现里只要 tiebreakers 有值就往 key 上拼）
+      · 真撞车时，两条记录依然要能被 tiebreakers 分开（不能因为堵了
+        漂移这个洞，把「同一天并行多个项目」这个原始需求也堵死了）
+    ═══════════════════════════════════════════════════════════════════
+    """
+
+    def _sheet(self, rows):
+        return FakeSheet(["企业", "机构", "访客时间", "目标国家地区"], rows)
+
+    def test_singleton_key_is_stable_even_after_tiebreaker_gets_filled_in(self):
+        """🔴 本次修复要守住的核心场景：唯一一行，消歧字段从空变有值，key 不能变。"""
+        s_before = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": ""},
+        ])
+        s_after = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "欧洲"},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        tb = ["目标国家地区"]
+        k_before = core.resolve_row_keys(s_before, [1], fields, tb)[1]
+        k_after = core.resolve_row_keys(s_after, [1], fields, tb)[1]
+        self.assertEqual(k_before, k_after,
+                         f"唯一一行不该因为消歧字段填了值就变 key：{k_before!r} vs {k_after!r}")
+        self.assertEqual(k_before, "甲公司|杭州分行|46202",
+                         "不撞车时 key 就该是纯基础 key，不带消歧字段的尾巴")
+
+    def test_true_collision_still_gets_disambiguated(self):
+        """真撞车（同一天并行两个项目）时，tiebreakers 仍要生效，两条不能共用一个 key。"""
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "欧洲"},
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "日本"},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        tb = ["目标国家地区"]
+        keys = core.resolve_row_keys(s, [1, 2], fields, tb)
+        self.assertNotEqual(keys[1], keys[2], keys)
+        self.assertTrue(keys[1] and keys[2], keys)
+
+    def test_collision_with_blank_tiebreaker_on_both_sides_still_collides(self):
+        """撞车了，但消歧字段两边都没填——帮不上忙，两条依然是同一个 key（撞车检测能抓住）。"""
+        s = self._sheet([
+            {"企业": "乙公司", "机构": "深圳分行", "访客时间": "46210",
+             "目标国家地区": ""},
+            {"企业": "乙公司", "机构": "深圳分行", "访客时间": "46210",
+             "目标国家地区": ""},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        tb = ["目标国家地区"]
+        keys = core.resolve_row_keys(s, [1, 2], fields, tb)
+        self.assertEqual(keys[1], keys[2])
+
+    def test_no_tiebreakers_configured_falls_back_to_plain_key_fields(self):
+        """没配 key_tiebreakers（tb=None/[]）时，行为必须跟这个能力出现之前完全一样。"""
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "欧洲"},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        self.assertEqual(core.resolve_row_keys(s, [1], fields, None)[1],
+                         "甲公司|杭州分行|46202")
+        self.assertEqual(core.resolve_row_keys(s, [1], fields, [])[1],
+                         "甲公司|杭州分行|46202")
+
+    def test_blank_base_key_rows_are_untouched(self):
+        """基础主键本身就读到空值的行，resolve_row_keys 不该把它拼出一个假 key。"""
+        s = self._sheet([
+            {"企业": "", "机构": "杭州分行", "访客时间": "46202", "目标国家地区": "欧洲"},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        self.assertEqual(core.resolve_row_keys(s, [1], fields, ["目标国家地区"])[1], "")
+
+
+class TieBreakerFieldMustExistTest(unittest.TestCase):
+    """
+    key_tiebreakers 引用的列，字段名打错必须立即失败，不许悄悄失效。
+
+    🔴 2026-08-21 复审发现：跟 scope_filters / terminal_states 这些配置字段
+    不同，key_tiebreakers 原来没被纳入 assert_sheet 的 referenced 列存在性
+    检查——字段名打错，sheet.text() 对不存在的列只会返回空字符串，消歧
+    功能因此**悄悄**永远拿不到值、永远不生效，跟「没配置」表现完全一样。
+    要等到真的出现并发撞车（这本来正是加 tiebreaker 要防的事）才会在运行时
+    暴露成主键重复的致命错，那时候完全看不出根因是字段名打错了。
+    """
+
+    def test_misspelled_field_is_fatal(self):
+        s = FakeSheet(["企业", "机构", "进入时间"],
+                      [{"企业": "甲公司", "机构": "杭州分行", "进入时间": TODAY}])
+        led = base_ledger(key_field=["企业", "机构"], name_field="企业",
+                          required_columns=["企业", "机构", "进入时间"],
+                          key_tiebreakers=["目标国家地区打错字"])
+        a = core.assert_sheet(s, led, {"nodes": []})
+        self.assertFalse(a.ok, "字段名打错不该悄悄通过")
+        self.assertTrue(any("目标国家地区打错字" in e for e in a.fatal), a.fatal)
+
+    def test_correct_field_name_is_not_flagged(self):
+        """列名写对时一切照旧，不能误伤。"""
+        s = FakeSheet(["企业", "机构", "进入时间", "目标国家地区"],
+                      [{"企业": "甲公司", "机构": "杭州分行", "进入时间": TODAY,
+                        "目标国家地区": ""}])
+        led = base_ledger(key_field=["企业", "机构"], name_field="企业",
+                          required_columns=["企业", "机构", "进入时间", "目标国家地区"],
+                          key_tiebreakers=["目标国家地区"])
+        a = core.assert_sheet(s, led, {"nodes": []})
+        self.assertTrue(a.ok, a.fatal)
+
+
+class TieBreakerOfflineValidationTest(unittest.TestCase):
+    """key_tiebreakers 配错要在 --validate-config 当场报错，不许等到运行时才崩。"""
+
+    def test_non_string_value_errors(self):
+        errs = core.validate_configs(
+            ledgers_cfg(key_tiebreakers=7), rules_cfg(), {})
+        self.assertTrue(
+            any("key_tiebreakers" in e for e in errs), errs)
+
+    def test_well_formed_config_passes(self):
+        errs = core.validate_configs(
+            ledgers_cfg(key_tiebreakers=["目标国家地区"]), rules_cfg(), {})
+        self.assertEqual([e for e in errs if "key_tiebreakers" in e], [])
+
+    def test_absent_is_fine(self):
+        errs = core.validate_configs(ledgers_cfg(), rules_cfg(), {})
+        self.assertEqual([e for e in errs if "key_tiebreakers" in e], [])
+
+
 if __name__ == "__main__":
     unittest.main()

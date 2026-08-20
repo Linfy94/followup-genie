@@ -117,6 +117,11 @@ def _rpc(method: str, params: dict | None = None) -> dict:
                                 idempotent=True).decode("utf-8", "replace")
             break
         except urllib.error.HTTPError as e:
+            # 🔴 HTTPError 本身是个类文件对象（持有底层连接），两条后续路径
+            # （直接 raise 401/403、或记录 last 继续重试）都不会自动关闭它——
+            # 不主动 close() 就要等 GC 才收，长期运行下去会攒一堆
+            # ResourceWarning。先关掉，两条路径都不用再操心。
+            e.close()
             last = f"HTTP {e.code}"
             if e.code in (401, 403):
                 raise LedgerError(

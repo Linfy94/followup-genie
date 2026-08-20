@@ -415,6 +415,15 @@ def validate_configs(ledgers: dict, rules: dict, output: dict) -> list[str]:
             except ValueError as exc:
                 errs.append(
                     f"台账「{l.get('name') or l.get('id') or i + 1}」的 scope_after 配置无效：{exc}")
+            # key_tiebreakers 配错（数字、对象、混合数组这类非法值）原来会被
+            # 静默过滤成空列表，消歧功能悄悄不生效，等真撞车了才暴露成
+            # 主键重复的致命错，那时完全看不出根因在这里。
+            try:
+                key_tiebreakers(l)
+            except ValueError as exc:
+                errs.append(
+                    f"台账「{l.get('name') or l.get('id') or i + 1}」的 "
+                    f"key_tiebreakers 配置无效：{exc}")
 
         # cross_ledger 的引用必须指向真实存在的台账。指错了只有跑到那个节点
         # 才炸，而那可能是几天后的事；能离线查出来就不该留到线上。
@@ -1542,14 +1551,18 @@ def check_manual_lists(sheet: qqdoc.Sheet, ledger: dict) -> Assertions:
     """
     a = Assertions()
     kfields = key_fields(ledger)
-    ktiebreakers = key_tiebreakers(ledger)
+    try:
+        ktiebreakers = key_tiebreakers(ledger)
+    except ValueError:
+        ktiebreakers = []  # validate_configs 已给出精确错误；这里不许二次裸崩
     key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
 
     # 台账当前的 序号 → 企业名
+    key_map = resolve_row_keys(sheet, sheet.data_rows, kfields, ktiebreakers)
     live: dict[str, str] = {}
     for r in sheet.data_rows:
-        k = row_key(sheet, r, kfields, ktiebreakers)
+        k = key_map[r]
         n = sheet.text(r, name_field)
         if k and n:
             live[k] = n
@@ -1596,7 +1609,11 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     """
     a = Assertions()
     kfields = key_fields(ledger)
-    ktiebreakers = key_tiebreakers(ledger)
+    try:
+        ktiebreakers = key_tiebreakers(ledger)
+    except ValueError as exc:
+        a.fatal.append(f"key_tiebreakers 配置无效：{exc}")
+        ktiebreakers = []
     key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
 
@@ -1662,6 +1679,11 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
     tc = ledger.get("terminal_column") or {}
     if tc.get("enabled") and tc.get("field"):
         referenced.add(tc["field"])
+    # 🔴 key_tiebreakers 字段名打错，原来不会被任何检查抓住——不像
+    # key_field 那样「解析出空列表 → 主键读到空值 → 致命错」会自动暴露，
+    # tiebreaker 打错字段名只会让消歧功能悄悄失效，要等到真的撞车才
+    # 会看出来。纳入 referenced，字段名打错就在这里当场报错。
+    referenced.update(ktiebreakers)
 
     ghost = sorted(f for f in referenced if not sheet.has_column(f))
     if ghost:
@@ -1705,8 +1727,14 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
                      for c in (ledger.get("scope_filters") or []))
               and _passes_scope_after(r)]
 
+    # 🔴 碰撞探测要在 rows 这个全集上做（不是 scoped）：范围外的行是否加
+    #    tiebreaker 不影响任何判定结果（它们本来就不会走到 state_key），
+    #    在全集上探测只是让「要不要加 tiebreaker」这件事更简单一致，
+    #    不用为范围内外分别讨论一遍。见 resolve_row_keys() 的完整说明。
+    key_map = resolve_row_keys(sheet, rows, kfields, ktiebreakers)
+
     def _key_problems(subset: list[int]) -> tuple[int, list[str]]:
-        ks = [row_key(sheet, r, kfields, ktiebreakers) for r in subset]
+        ks = [key_map[r] for r in subset]
         return (sum(1 for k in ks if not k),
                 sorted({k for k in ks if k and ks.count(k) > 1}))
 
@@ -1785,8 +1813,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         for r in _rows_needing(f):
             if sheet.date(r, f) is not None:
                 continue
-            (blank if not sheet.text(r, f) else unparsable).append(
-                row_key(sheet, r, kfields, ktiebreakers))
+            (blank if not sheet.text(r, f) else unparsable).append(key_map[r])
         if blank:
             a.warnings.append(
                 f"{f} 有 {len(blank)} 行为空（{', '.join(blank[:8])}"
@@ -1826,7 +1853,7 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         #    这些行本来就不进催办流程，日期解不解析都不影响任何判定。
         today = date.today()
         future = [
-            row_key(sheet, r, kfields, ktiebreakers) for r in live
+            key_map[r] for r in live
             if (d := sheet.date(r, f)) and d > today
         ]
         if future:
@@ -2116,6 +2143,12 @@ def key_tiebreakers(ledger: dict) -> list[str]:
        规则对它不适用，需要另一种语义：能区分就区分，不能区分不算错。
 
     跟 key_field 一样支持标量或数组写法，不另起一套。
+
+    🔴 2026-08-21 复审发现：数字、对象、混合数组这类非法值原来会被
+       静默过滤成空列表——配置打错，消歧功能悄悄不生效，直到真的撞车
+       才会在运行时暴露成主键重复的致命错，而那时候完全看不出来根因
+       是 key_tiebreakers 本身配错了。改成非法输入直接报错，离线校验
+       当场抓住，不留到「哪天真撞车了才知道」。
     """
     raw = ledger.get("key_tiebreakers")
     if raw is None:
@@ -2123,8 +2156,16 @@ def key_tiebreakers(ledger: dict) -> list[str]:
     if isinstance(raw, str):
         return [raw] if raw.strip() else []
     if isinstance(raw, list):
-        return [f for f in raw if isinstance(f, str) and f.strip()]
-    return []
+        bad = [f for f in raw if not (isinstance(f, str) and f.strip())]
+        if bad:
+            raise ValueError(
+                f"key_tiebreakers 数组里有非法元素：{bad!r}，"
+                f"每一项都必须是非空字符串"
+            )
+        return list(raw)
+    raise ValueError(
+        f"key_tiebreakers 必须是字符串或字符串数组，实际是 {_type_name(raw)}"
+    )
 
 
 def row_key(sheet, row: int, fields: list[str], tiebreakers: list[str] | None = None) -> str:
@@ -2148,6 +2189,58 @@ def row_key(sheet, row: int, fields: list[str], tiebreakers: list[str] | None = 
         if v:
             key += f"‖{v}"
     return key
+
+
+def resolve_row_keys(sheet, rows: list[int], fields: list[str],
+                     tiebreakers: list[str] | None = None) -> dict[int, str]:
+    """
+    给一批行统一算出最终主键。**这是 tiebreakers 唯一该被使用的入口**——
+    别再直接给 row_key() 传 tiebreakers，那样算出来的 key 会漂移。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 复审发现：`row_key(..., tiebreakers)` 原来的语义——"消歧字段有值就
+    追加"——会让**同一个项目**的 key 随时间漂移。消歧字段（比如「目标国家
+    地区」）往往是业务后填的：一个项目推进一步、这一列从空变有值，
+    key 就从 "企业|机构|日期" 变成 "企业|机构|日期‖地区"。而 state_key
+    直接拼自这个 key，旧记录（stage_entered / followup_state）在新 key
+    下查不到，项目被当成从没出现过。
+
+    实测复现：一个仍在 14 天静默期里的项目，只因为消歧字段被业务填上，
+    第二天就重新进了待催清单，而且没有任何报错——这正是本项目最怕的
+    「静默变成不该有的行为」。
+
+    根因是把「消歧」和「主键本身」混在了一起。真正需要消歧字段参与的
+    只有一种情况：**不加它就会跟别的行撞车**（业务确认过的「同一天
+    并行多个项目」，实测只占极少数——trade_qq 里 36 行中的 4 行）。
+    绝大多数行从头到尾只有它自己一个，压根不需要消歧，它的 key 就该
+    只由 key_field 决定、永远不随消歧字段的值变化而变化。
+
+    做法：先用**不含 tiebreakers** 的基础 key 扫一遍，只有基础 key
+    出现次数 > 1（真的撞车）的那几行，才追加 tiebreakers；其余行原样
+    用基础 key。消歧字段从空变有值，因此只会影响真正撞车的那一小撮行。
+
+    🔴 残留的、更小众的风险没有完全消除：如果原本 singleton 的一行，
+    某天业务新增了一条相同基础 key 的记录（比如真的复购了），且这一行
+    自己的消歧字段本来就有值，它的 key 会在这一刻从「不带后缀」变成
+    「带后缀」——这仍是一种漂移，但触发条件苛刻得多（需要「新增一行
+    同基础 key 记录」这个业务动作，不是每个项目迟早都会经历的填表流程），
+    且这本身就是「两个同名项目」这种场景固有的复杂度，不是这个函数
+    能单独兜底的。留作已知限制，不在本轮解决。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    base = {r: row_key(sheet, r, fields) for r in rows}
+    dup_count: dict[str, int] = {}
+    for k in base.values():
+        if k:
+            dup_count[k] = dup_count.get(k, 0) + 1
+    result = {}
+    for r in rows:
+        b = base[r]
+        if b and tiebreakers and dup_count.get(b, 0) > 1:
+            result[r] = row_key(sheet, r, fields, tiebreakers)
+        else:
+            result[r] = b
+    return result
 
 
 def key_label(fields: list[str]) -> str:
@@ -2632,6 +2725,9 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
             )
 
     kfields = key_fields(ledger)
+    # key_tiebreakers(ledger) 已在 assert_sheet 里校验过（config 就是同一个
+    # ledger），走到这里必然合法，不必再 try/except —— 那道 gate 已经在本函数
+    # 开头把 not a.ok 的情况挡在了这里之前。
     ktiebreakers = key_tiebreakers(ledger)
     key_field = key_label(kfields)
     name_field = ledger.get("name_field", "项目名称")
@@ -2648,11 +2744,16 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
     # 走到这里必然合法，不必再 try/except —— 那道 gate 已经在 evaluate_ledger
     # 开头把 not a.ok 的情况挡在了这个循环之前。
     sa = scope_after(ledger)
+    # 🔴 主键必须用 resolve_row_keys()，不能直接给 row_key() 传 ktiebreakers——
+    # 那样算出来的 key 会随消歧字段的值漂移，state_key 跟着变，旧的
+    # stage_entered/followup_state 记录查不到，项目被当成从没出现过，
+    # 可能重发一次首次催办。见 resolve_row_keys() 的完整说明。
+    key_map = resolve_row_keys(sheet, rows, kfields, ktiebreakers)
 
     for r in rows:
         get_text = lambda f, _r=r: sheet.text(_r, f)  # noqa: E731
         get_date = lambda f, _r=r: sheet.date(_r, f)  # noqa: E731
-        key = row_key(sheet, r, kfields, ktiebreakers)
+        key = key_map[r]
         name = sheet.text(r, name_field)
 
         # 1) 责任范围：范围外的行压根不进催办流程
