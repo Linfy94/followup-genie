@@ -759,6 +759,41 @@ class DailyRunRecoversInterruptedTransactionTest(unittest.TestCase):
                 read_state(home, "stage_entered.json"),
                 {"box|3‖欧洲|efficiency_test": "2026-02-09"},
                 "🔴 诊断模式不许动现场")
+
+    def test_real_run_refuses_to_judge_when_recovery_cannot_resolve(self):
+        """
+        🔴 2026-08-21 第七轮复审：复原不一定能彻底解决——备份目录本身
+        缺失/损坏时，recover_state_transaction() 只能报警告、事务日志
+        仍然留着。这种情况绝不能带着不确定的状态继续往下判定，必须
+        整体拒绝，跟 bootstrap.py 那条"判不清就别自称安全"是同一条规矩。
+        """
+        from harness import make_sheet, row, days_ago, run_main
+        from datetime import date
+        today = date(2026, 7, 20)
+        sheet = make_sheet([row(1, "甲公司", tech="待收资",
+                               reported=days_ago(today, 40),
+                               progress=days_ago(today, 40))])
+        with temp_home() as home:
+            state = home / "followup" / "state"
+            broken = {"box|3‖欧洲|efficiency_test": "2026-02-09"}
+            (state / "stage_entered.json").write_text(
+                json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            # 日志指向一个根本不存在的备份目录——复原没法进行。
+            (state / core.STATE_TXN_FILE).write_text(json.dumps({
+                "backup_dir": str(state / "这个备份目录不存在"),
+                "files": ["stage_entered.json"],
+                "started_at": "2026-08-21T00:00:00+08:00", "pid": 1,
+            }, ensure_ascii=False), encoding="utf-8")
+
+            r = run_main([f"--today={today.isoformat()}", "--force-push"], sheet)
+
+            self.assertNotEqual(r.code, 0, "判不清状态就必须拒绝，不能显示成功")
+            self.assertFalse(r.posts, "拒绝判定就不该推送任何催办")
+            self.assertEqual(
+                read_state(home, "stage_entered.json"), broken,
+                "既然判不清，就不该再动这个文件——原样留着让人查")
+            self.assertIsNotNone(read_state(home, core.STATE_TXN_FILE),
+                                "事务日志必须留着，下次运行还要能再看到它")
             self.assertIsNotNone(read_state(home, core.STATE_TXN_FILE),
                                 "事务日志也要原样留着")
 

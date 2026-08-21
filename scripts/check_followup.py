@@ -729,6 +729,25 @@ def main(argv: list[str] | None = None) -> int:
         return fail("配置校验", "config/ledgers.json 里没有启用的台账",
                     output_cfg, code=2, real_run=real_run)
 
+    # 🔴 2026-08-21 第七轮复审补的场景：`bootstrap.py` 把代码换成新版之后、
+    # 真正调用迁移之前被强杀——往后没人再手动重跑一次安装，定时任务就会
+    # 直接在"新代码 + 从没迁移过的旧状态"上开始跑，正是这一整套迁移机制
+    # 最初要防的那个 P0，只是换了个没被覆盖到的入口。纯本地文件判断，
+    # 不联网，跟诊断模式一样都要挡——这不是"今天没有超时单"，是状态
+    # 可信度没法保证。
+    if not core.migration_marker_present() and any(
+            l.get("key_tiebreakers") for l in active):
+        return fail(
+            "状态迁移未确认完成",
+            "有台账配置了 key_tiebreakers，但没有找到迁移完成标记"
+            "（state/migrations_completed.json）。多半是升级时安装器在"
+            "真正执行迁移之前就被中断了（比如被强杀）——代码已经是新版，"
+            "但状态从没经过迁移核对，用旧格式的历史主键去判定可能误判"
+            "重复催办或漏催。请重跑一次安装"
+            "（python3 scripts/bootstrap.py --host ...），"
+            "或直接执行 scripts/migrate_rc15_key_state.py --apply。",
+            output_cfg, code=2, real_run=real_run)
+
     # ── 运行锁：两次同时跑会互相覆盖状态、重复推送 ──
     lock_path = None
     lock_token = ""
@@ -751,6 +770,21 @@ def main(argv: list[str] | None = None) -> int:
             recovered = core.recover_state_transaction()
             if recovered:
                 run_warnings.extend(recovered)
+                # 🔴 复原不一定能彻底解决（备份缺失、复原本身又写失败）——
+                #    那种情况 pending_state_transaction() 仍不为 None，日志
+                #    里也带着 ⚠️。这时绝不能带着不确定的状态继续往下判定，
+                #    必须整体拒绝，跟"判不清就别自称安全"是同一条规矩
+                #    （见 bootstrap.py 的 StateRecoveryUnsafe）。fail() 自己
+                #    会发告警、记 health，这里不重复发一遍。
+                if core.pending_state_transaction() is not None:
+                    core.release_lock(lock_path, lock_token)
+                    lock_path = None
+                    return fail(
+                        "状态改写恢复",
+                        "上一次的状态改写无法自动复原，状态可能不完整，"
+                        "已停止本次运行，不会产生任何催办：\n"
+                        + "\n".join(f"· {line}" for line in recovered),
+                        output_cfg, code=1, real_run=True)
                 ok, why = alert(
                     "🔴 项目跟进精灵：上一次状态改写没走完，已自动复原\n\n"
                     + "\n".join(f"· {line}" for line in recovered)

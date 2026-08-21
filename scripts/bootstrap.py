@@ -28,6 +28,20 @@ class BootstrapError(RuntimeError):
     """可直接向业务说明的安装故障。"""
 
 
+class StateRecoveryUnsafe(BootstrapError):
+    """
+    迁移子进程异常退出（含被强杀）之后，连"状态改写有没有走完"都判断
+    不清楚——见 run_migration() 里对 --recover-only 退出码 1 的处理。
+
+    🔴 2026-08-21 第七轮复审：**这个异常绝不能走普通 BootstrapError 的
+    自动回滚路径**。install_or_rollback() 收到普通 BootstrapError 时会
+    把代码退回旧版、然后放心地说"现有的定时任务仍在跑原来那一版"——
+    但这里我们判不清状态是新是旧、完不完整，回滚代码在信息不足的情况下
+    又是一次赌注：旧代码遇上一个它完全没见过的中间态状态目录，行为
+    没有任何保证。原样留在现场，让人来看，比再赌一把安全。
+    """
+
+
 def package_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -258,6 +272,10 @@ def install_or_rollback(source: Path, skill_dir: Path, runtime_home: Path,
         if snap is not None:  # 升级才需要迁移；首次安装没有旧状态
             run_migration(skill_dir, runtime_home, hermes=hermes)
         return retired
+    except StateRecoveryUnsafe:
+        # 🔴 刻意不回滚代码、不碰快照——见 StateRecoveryUnsafe 的说明。
+        #    状态已经判不清了，这里再去动代码只是在信息不足时又赌一把。
+        raise
     except BootstrapError:
         if snap is not None:
             try:
@@ -409,11 +427,65 @@ def run_migration(skill_dir: Path, runtime_home: Path, hermes: bool = False) -> 
         )
     except OSError as exc:
         raise BootstrapError(f"无法启动状态迁移：{exc}") from exc
-    if result.returncode != 0:
-        raise BootstrapError(
-            f"升级后的状态迁移未完成（退出码 {result.returncode}），已停止，"
-            f"不会让定时任务在未迁移的状态上跑。"
+    if result.returncode == 0:
+        return
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 🔴 2026-08-21 第七轮复审指出的 P0：迁移子进程失败——**包括被强杀**
+    # （SIGKILL 这类连 except 都拦不住的信号，subprocess.run 会报出负的
+    # 信号号当退出码）。原来这里直接 raise BootstrapError，外层
+    # install_or_rollback() 收到就把代码退回旧版、并且放心地打印"现有的
+    # 定时任务仍在跑原来那一版"。但旧代码完全不认识 rc19 才有的这套
+    # 状态事务日志机制——它不会去处理日志、不会去复原，日志会孤零零地
+    # 留在盘上，而状态可能已经被改了一部分。旧代码在这种"部分新、部分旧"
+    # 的状态上直接开始跑，正是这一整套机制最初要防的那个 P0，只是换了
+    # 个没被覆盖到的触发路径。
+    #
+    # 补法：趁新版代码**还没被换掉**，用它自己的恢复程序（--recover-only，
+    # 见 migrate_rc15_key_state.py 里的说明）先把状态判个清楚，再决定
+    # 「能不能回滚代码」——而不是想当然地直接回滚。
+    # ═══════════════════════════════════════════════════════════════════
+    try:
+        recovery = subprocess.run(
+            [sys.executable, str(script), "--recover-only"],
+            cwd=str(skill_dir), env=env, check=False,
         )
+    except OSError as exc:
+        # 连恢复程序都启动不了——比"判不清"更糟，同样不能自称安全。
+        raise StateRecoveryUnsafe(
+            f"升级后的状态迁移异常退出（退出码 {result.returncode}），"
+            f"且恢复程序本身都无法启动（{exc}）。当前状态可能不完整，"
+            f"已停止升级，**未回滚代码**（回滚代码但不确定状态是否配套，"
+            f"同样不安全）。请人工核对 {runtime_home / 'followup' / 'state'} "
+            f"下的状态文件与备份目录，确认后再继续。"
+        ) from exc
+
+    if recovery.returncode in (0, 3):
+        # 0：状态从头到尾没被碰过（多半是败在联网取数那一步，走到不了
+        #    写状态那里）；3：确认没写完，已经照备份整体复原。两种都是
+        #    "状态回到了旧代码认得的样子"，可以放心让下面的异常触发回滚。
+        raise BootstrapError(
+            f"升级后的状态迁移未完成（退出码 {result.returncode}），"
+            f"状态已确认回到升级前的样子，正在回滚代码。"
+        )
+    if recovery.returncode == 2:
+        # 其实已经完整写完，只是清理日志那一步没走完——状态是新的，
+        # 回滚代码反而会制造"状态新、代码旧"。不算失败，正常返回，
+        # 让 install_or_rollback() 继续走下去、保留新代码。
+        print("ℹ️ 迁移子进程虽然异常退出，但状态经核对其实已经完整写完"
+              "（多半是清理日志这最后一步被打断）。保留新代码，不回滚。")
+        return
+
+    # recovery.returncode 既不是 0/2/3——判不清，绝不能自称"安全"。
+    raise StateRecoveryUnsafe(
+        f"升级后的状态迁移异常退出（退出码 {result.returncode}），且自动恢复"
+        f"也没能确认状态是否完整（恢复程序退出码 {recovery.returncode}）。\n"
+        f"🔴 当前状态可能处于不完整的中间态，无法判断是新是旧。"
+        f"已停止升级，**未回滚代码**（回滚代码但不确定状态是否配套，"
+        f"同样不安全）。请人工核对 {runtime_home / 'followup' / 'state'} "
+        f"下的状态文件、.state-transaction.json 与 .migrate-rc15-backup-* "
+        f"备份目录，确认后再继续。在此之前，不应该让定时任务基于当前状态运行。"
+    )
 
 
 def _report_retired(retired: list[str]) -> None:

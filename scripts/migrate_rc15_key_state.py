@@ -83,8 +83,12 @@ STATE_FILES = ("stage_entered.json", "followup_state.json", "stage_history.json"
 # 重跑——rc15 之后的代码从没生产过 rc14 式的旧 key，未来任何新增的
 # key_tiebreakers 台账从第一天起就是新 key，没有旧 key 可迁。这个标记
 # 让 bootstrap.py 往后每次升级都能跳过一次不必要的联网 + 抢锁。
-MIGRATION_MARKER_FILE = "migrations_completed.json"
-MIGRATION_ID = "rc15_key_tiebreakers"
+#
+# 常量定义在 core.py（跟 check_followup.py 共用，见那边的说明），这里
+# 引出同名别名，不改动本文件里原有的引用写法，也保持 `migrate.
+# MIGRATION_MARKER_FILE` 这个外部可见名字不变（测试在用）。
+MIGRATION_MARKER_FILE = core.MIGRATION_MARKER_FILE
+MIGRATION_ID = core.MIGRATION_ID
 
 
 def snapshot_file_name(ledger_id: str) -> str:
@@ -159,27 +163,98 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--apply", action="store_true", help="真正改写状态文件；不加只打印计划")
+    ap.add_argument("--recover-only", action="store_true",
+                    help="只判断/处理上一次没走完的改写，不做任何新的迁移计划、"
+                         "不联网。专给 bootstrap.py 在迁移子进程异常退出"
+                         "（含被强杀）之后调用，见 _recover_only() 的说明。")
     args = ap.parse_args()
 
     # 🔴 锁只在真正写盘时才取——纯读计划不写状态，跟每日任务不存在竞态，
     #    不该为了看一眼计划就去抢锁、跟正在跑的 9 点任务过不去。
+    #    --recover-only 本身可能要写（复原/清理），也要取锁。
+    need_lock = args.apply or args.recover_only
     lock_path = None
     lock_token = ""
-    if args.apply:
+    if need_lock:
         try:
             lock_path, lock_token, steal = core.acquire_lock()
             if steal:
                 print(f"⚠️  {steal}", file=sys.stderr)
         except core.LockBusy as e:
-            print(f"❌ 抢不到运行锁，本次迁移未执行（{e}）。"
+            print(f"❌ 抢不到运行锁，本次未执行（{e}）。"
                   f"多半是每日任务正在跑，等它结束后重试。", file=sys.stderr)
             return 1
 
     try:
+        if args.recover_only:
+            return _recover_only()
         return _run(apply=args.apply)
     finally:
         if lock_path:
             core.release_lock(lock_path, lock_token)
+
+
+def _recover_only() -> int:
+    """
+    只判断并处理"上一次改写有没有走完"，不做任何新的迁移计划、不联网。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-21 第七轮复审指出的 P0：迁移子进程一旦被**强杀**（不是
+    异常退出，是收到 SIGKILL 这类连 `except` 都拦不住的信号），进程内
+    自己那套"炸了就地复原"的 try/except 完全没有机会执行——`main()`
+    的 `finally` 也不会跑，连锁都不会释放。`bootstrap.py` 只看到子进程
+    退出码非零（信号杀死的进程 `subprocess.run` 会报出负的信号号），
+    直接回滚**代码**。但那时状态可能停在"已经改了一部分"的中间态，
+    而**回滚代码这个动作本身完全不知道事务日志的存在**——旧代码
+    （被回滚回去的那版）压根没有这套机制，日志会一直孤零零地留在
+    盘上，没有任何东西会去处理它。
+
+    这个函数就是补的那个缺口：`bootstrap.py` 在打算回滚代码之前，
+    **趁新版代码还没被换掉**，先调用这个模式，把状态判个清楚。
+
+    退出码是给 bootstrap.py 读的机器接口，不是人话——它要拿这个做
+    "能不能回滚代码"的判断，不能靠翻日志文字去猜（脆，见坑#12）：
+
+      0 = 本来就没有没走完的改写。可能是这次失败根本没走到
+          begin_state_transaction() 那一步（比如联网取数失败），
+          状态从头到尾没被碰过，回滚代码是安全的。
+      2 = 发现过，且确认那次其实已经完整写完——只是清理日志这最后
+          一步没走完，已经补上清理。**状态是新的**，回滚代码会造出
+          "状态新、代码旧"，绝不能回滚。
+      3 = 发现过，确认没写完，已经照备份把状态整体复原回旧版认得
+          的样子。可以放心回滚代码。
+      1 = 发现过，但没能可靠复原（备份缺失、或复原本身也写失败）。
+          状态到底是新是旧、完不完整，现在判不清——绝不能宣称
+          "已安全"，调用方必须整体拒绝、不能让定时任务碰这批状态。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    core.set_read_only(False)
+    txn = core.pending_state_transaction()
+    if txn is None:
+        print("没有发现没走完的状态改写。")
+        return 0
+
+    # 🔴 必须在调用 recover（它会改状态）**之前**问这个问题——答案要的是
+    #    "崩溃现场当时是什么样"，不是"复原动作跑完之后是什么样"。
+    was_already_complete = core.state_transaction_matches_expected(txn)
+
+    for line in core.recover_state_transaction():
+        print(line)
+
+    if core.pending_state_transaction() is not None:
+        print("❌ 无法可靠判定/复原上一次的状态改写——备份或复原本身出了问题，"
+              "状态可能处于不完整状态，需要人工核对（详见上面的日志，以及 "
+              "state/.state-transaction.json 里指向的备份目录）。", file=sys.stderr)
+        return 1
+
+    if was_already_complete:
+        print("✅ 上一次改写其实已经完整落地，只是清理日志没走完——"
+              "状态是新的，不需要回滚代码。")
+        return 2
+
+    print("✅ 上一次改写没有走完，已照备份把状态整体复原——"
+          "状态回到了旧版本认得的样子，可以放心回滚代码。")
+    return 3
 
 
 def _run(*, apply: bool) -> int:

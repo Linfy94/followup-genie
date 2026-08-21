@@ -835,6 +835,23 @@ def _live_state_hash(name: str) -> str | None:
         return None
 
 
+def state_transaction_matches_expected(txn: dict) -> bool:
+    """
+    这批状态文件是不是已经全部改成「该有的样子」——即这次改写其实已经
+    完整落地，只是清理事务日志这最后一步没走完（可能是删除失败，
+    也可能是进程在这一步之前被强杀，两者从盘面上看不出区别，也不需要
+    分辨——结果都是"数据已经对，只是日志还在"）。
+
+    🔴 2026-08-21 第七轮复审后单独抽出来（原来内联在 recover_state_transaction
+    里）：`bootstrap.py` 的迁移子进程失败处理需要在**动手复原之前**先知道
+    这个答案，才能决定"能不能保留新代码"，不能靠事后翻恢复日志的文字
+    去猜——那是字符串匹配，脆且容易漂移（见坑#12）。两处调用同一个函数，
+    答案必然一致。
+    """
+    expected = txn.get("expected") or {}
+    return bool(expected) and all(_live_state_hash(n) == h for n, h in expected.items())
+
+
 def recover_state_transaction() -> list[str]:
     """
     发现没走完的状态改写就照备份复原。返回人话日志（没事发生则为空）。
@@ -861,8 +878,7 @@ def recover_state_transaction() -> list[str]:
     #    落地了，只是删日志那一步失败。此时**绝不能回滚** —— 回滚会把
     #    一次成功的迁移退回旧 key，而代码已经是新版本，正好凑成这套
     #    机制要防的那个「状态旧、代码新」。只清理日志。
-    expected = txn.get("expected") or {}
-    if expected and all(_live_state_hash(n) == h for n, h in expected.items()):
+    if state_transaction_matches_expected(txn):
         log.extend(finish_state_transaction())
         log.append("上次状态改写其实已经完整落地，只是事务日志没删掉；"
                    "已核对每个文件都与预期一致，只清理了日志，未回滚任何状态。")
@@ -895,9 +911,40 @@ def recover_state_transaction() -> list[str]:
                            f"事务日志保留，下次运行会再试一次")
                 return log
 
-    finish_state_transaction()
+    log.extend(finish_state_transaction())
     log.append(f"上次状态改写没走完，已照备份 {backup_dir.name} 整体复原。")
     return log
+
+
+# ── 迁移完成标记 ──────────────────────────────────────────────────────
+#
+# 🔴 `migrate_rc15_key_state.py` 与 `check_followup.py` 共用这两个常量，
+#    定义放这里、两边 import——避免坑#12（同一件事写两份实现，迟早漂移）。
+#    `bootstrap.py` **不**从这里 import：它刻意不依赖 scripts/ 下除
+#    `_manifest` 之外的任何模块，保持"就算 core.py 坏了，装机本身还能跑"
+#    这条隔离性，所以在自己文件里另定义了一份同名同值的常量，靠注释
+#    互相看得见对方，不算漂移风险（两边都不会被单独改动到不一致，
+#    因为改这个 ID 意味着接一套新的迁移，那本来就要两处一起动）。
+
+MIGRATION_MARKER_FILE = "migrations_completed.json"
+MIGRATION_ID = "rc15_key_tiebreakers"
+
+
+def migration_marker_present() -> bool:
+    """
+    rc15 主键迁移是否已经确认完成过一次。**纯本地文件判断，不联网**——
+    每日任务可以放心天天调用。
+
+    🔴 2026-08-21 第七轮复审补的场景：安装器把代码换成新版之后、
+       真正调用迁移之前被强杀，往后没人再手动重跑一次 bootstrap，
+       定时任务直接在"新代码 + 从没迁移过的旧状态"上开始跑——这正是
+       这一整套迁移机制最初要防的那个 P0，只是换了个没被覆盖到的入口。
+       调用方（check_followup.py）拿这个函数配合"有没有台账配了
+       key_tiebreakers"做一次纯本地兜底检查，标记不存在且确实有台账
+       需要迁移时拒绝往下跑，而不是假装什么事都没有。
+    """
+    marker = read_state(MIGRATION_MARKER_FILE)
+    return MIGRATION_ID in marker
 
 
 # ── 健康记录 ──────────────────────────────────────────────────────────
