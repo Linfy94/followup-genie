@@ -265,13 +265,23 @@ def _run(*, apply: bool) -> int:
 
     backup_dir = core.state_dir() / f".migrate-rc15-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    # 🔴 完成标记必须一起进这批文件。否则「状态和标记都写完了、但删事务
-    #    日志之前被打断」时，恢复会把状态退回迁移前、标记却留着说"已迁移"，
-    #    迁移再也不会重跑 —— 又一个状态与代码不一致，只是换了个方向。
-    write_names = (list(STATE_FILES)
-                   + [snapshot_file_name(lid) for lid in snapshots]
-                   + [MIGRATION_MARKER_FILE])
-    for name in write_names:
+
+    # 🔴 改完之后每个文件该长什么样，**在动手之前就全部算出来**。
+    #    两个理由：
+    #      ① 完成标记必须一起进这批文件。否则「状态和标记都写完了、但删
+    #         事务日志之前被打断」时，恢复会把状态退回迁移前、标记却留着
+    #         说"已迁移"，迁移再也不会重跑 —— 又一个状态与代码不一致。
+    #      ② 事务日志要记下这批"应有内容"的指纹，恢复时才分得清
+    #         「没改完」和「改完了只是没删掉日志」这两种相反的情况。
+    #         标记里的时间戳因此也必须在这里定死，不能等到写的时候再取，
+    #         否则算出来的指纹跟实际写下去的对不上。
+    marker = core.read_state(MIGRATION_MARKER_FILE)
+    marker[MIGRATION_ID] = core.now_iso()
+    final: dict[str, dict] = {name: state[name] for name in STATE_FILES}
+    final.update({snapshot_file_name(lid): snap for lid, snap in snapshots.items()})
+    final[MIGRATION_MARKER_FILE] = marker
+
+    for name in final:
         src = core.state_dir() / name
         if src.exists():
             shutil.copy2(src, backup_dir / name)
@@ -279,10 +289,10 @@ def _run(*, apply: bool) -> int:
 
     # 🔴 备份做完之后、第一次改写之前，先宣告「要开始改了」。从这一刻起，
     #    不管在哪一步被打断（异常、断电、被强杀、连下面的恢复动作自己
-    #    失败），盘上都留着事务日志，下一个碰状态的进程会照备份复原。
+    #    失败），盘上都留着事务日志，下一个碰状态的进程会照它处理。
     #    见 core.py 里「状态改写事务日志」那一段。
     try:
-        core.begin_state_transaction(backup_dir, write_names)
+        core.begin_state_transaction(backup_dir, final)
     except Exception as e:
         # 🔴 日志自己都没写成，就绝不能开始改 —— 真改了再炸，盘上没有
         #    任何痕迹说明"有一次改写没走完"，恢复机制整个失灵。
@@ -292,12 +302,9 @@ def _run(*, apply: bool) -> int:
         return 1
 
     try:
-        for name in STATE_FILES:
-            core.write_state(name, state[name])
-        for lid, snap in snapshots.items():
-            core.write_state(snapshot_file_name(lid), snap)
+        for name, data in final.items():
+            core.write_state(name, data)
         print("已写入迁移后的状态文件。")
-        _mark_migration_done()
     except Exception as e:
         # 就地复原一次。**即便这次复原自己也失败**，事务日志仍然留在盘上，
         # 下一次运行（迁移重跑或每日任务启动）会再试一次 —— 这正是加日志
@@ -308,7 +315,10 @@ def _run(*, apply: bool) -> int:
               f"已按事务日志把状态整体复原，没有留下半写状态。", file=sys.stderr)
         return 1
 
-    core.finish_state_transaction()
+    # 🔴 删日志失败**不算迁移失败**：状态已经完整落地了，此时返回非零会
+    #    让安装器回滚代码，反而制造出"状态新、代码旧"。只把警告打出来。
+    for line in core.finish_state_transaction():
+        print(line, file=sys.stderr)
     return 0
 
 

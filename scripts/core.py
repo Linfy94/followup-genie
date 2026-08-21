@@ -16,6 +16,7 @@
 from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
 
 import calendar
+import hashlib
 import json
 import os
 import ssl
@@ -685,6 +686,19 @@ def ensure_state_dir() -> None:
             pass
 
 
+def _state_text(data: dict) -> str:
+    """
+    状态文件的落盘文本。**write_state 与事务日志的指纹共用这一个函数** ——
+    分开写两份迟早漂移，那会让「改完之后应该长什么样」算出来跟实际写下去的
+    对不上，恢复逻辑就会把一次成功的改写误判成半写（见坑#12）。
+    """
+    return json.dumps(data, ensure_ascii=False, indent=1)
+
+
+def _state_bytes(data: dict) -> bytes:
+    return _state_text(data).encode("utf-8")
+
+
 def write_state(name: str, data: dict) -> None:
     if _block(f"write_state({name})"):
         return
@@ -692,7 +706,10 @@ def write_state(name: str, data: dict) -> None:
     p = _state_path(name)
     tmp = p.with_name(f"{p.name}.tmp.{uuid.uuid4().hex}")
     try:
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        # 🔴 保持 write_text：tests/test_concurrency.py 靠挂钩它来验证
+        #    两个并发写不会共用同一个临时文件名。换成 write_bytes 会让
+        #    那道护栏静默失效（2026-08-21 实测踩到过）。
+        tmp.write_text(_state_text(data), encoding="utf-8")
         tmp.replace(p)  # 原子替换，避免写一半被中断留下坏文件
     finally:
         try:
@@ -753,31 +770,69 @@ def pending_state_transaction() -> dict | None:
                                                 "damaged": True}
 
 
-def begin_state_transaction(backup_dir: Path, names: list[str]) -> None:
+def begin_state_transaction(backup_dir: Path, final: dict[str, dict]) -> None:
     """
     宣告「我要开始改这批状态文件了，改坏了照这个备份恢复」。
 
-    **必须在备份已经做完之后、第一次改写之前调用** —— 顺序反了，
-    日志会指向一份还不完整的备份。
+    `final` 是 {文件名: 改完之后应有的内容}。**必须在备份已经做完之后、
+    第一次改写之前调用** —— 顺序反了，日志会指向一份还不完整的备份。
+
+    🔴 为什么要连「改完之后应该长什么样」一起记下来（2026-08-21 第六轮
+       复审）：光有日志不够。删日志本身也是一次可能失败的写操作，所以
+       「日志还在」其实混淆了两种**相反**的情况——
+
+         · 没改完就崩了      → 必须照备份回滚
+         · 改完了只是没删掉日志 → **绝不能回滚**（回滚会把一次成功的
+                                 迁移退回旧 key，而代码已经是新版，
+                                 正是这套机制要防的那个 P0）
+
+       加一个「已提交」标志位能缩小这个窗口，但消不掉它：写标志位本身
+       同样可能失败，那时状态是完整的、标志却说没提交，照样错误回滚。
+       记指纹则让恢复逻辑**自己判断**处于哪种情况，不依赖任何一次
+       可能失败的写入 —— 指纹是在动手之前就算好的，比较是确定性的。
     """
     if _block("begin_state_transaction"):
         return
     write_state(STATE_TXN_FILE, {
         "backup_dir": str(backup_dir),
-        "files": list(names),
+        "files": list(final),
+        # 文件名 → 改完之后该有的内容指纹
+        "expected": {name: hashlib.sha256(_state_bytes(data)).hexdigest()
+                     for name, data in final.items()},
         "started_at": now_iso(),
         "pid": os.getpid(),
     })
 
 
-def finish_state_transaction() -> None:
-    """全部改完（含完成标记）才调。删掉日志 = 宣告这次改写完整落地。"""
+def finish_state_transaction() -> list[str]:
+    """
+    全部改完（含完成标记）才调。删掉日志 = 宣告这次改写完整落地。
+
+    🔴 删不掉**不算失败**，但必须说出来：状态已经完整落地了，此时
+       报错回滚反而是错的。日志留着也不会造成误回滚 —— 恢复逻辑会
+       比对指纹，发现「跟改完之后该有的样子一致」就只清理、不回滚。
+       返回给调用方的这句警告只是提醒有人去看一眼文件系统。
+    """
     if _block("finish_state_transaction"):
-        return
+        return []
     try:
         _state_path(STATE_TXN_FILE).unlink()
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as e:
+        return [f"⚠️  状态改写已完整落地，但事务日志没删掉（{type(e).__name__}: {e}）。"
+                f"不影响正确性（下次运行会比对指纹后只做清理、不回滚），"
+                f"但说明状态目录可能有权限或文件系统问题，值得看一眼。"]
+    return []
+
+
+def _live_state_hash(name: str) -> str | None:
+    """盘上这个状态文件当前内容的指纹；文件不存在返回 None。"""
+    p = _state_path(name)
+    try:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def recover_state_transaction() -> list[str]:
@@ -800,6 +855,18 @@ def recover_state_transaction() -> list[str]:
     log: list[str] = []
     backup_dir = Path(txn.get("backup_dir") or "")
     names = txn.get("files") or []
+
+    # 🔴 先分清是哪一种「日志还在」（2026-08-21 第六轮复审）：
+    #    改完之后每个文件都跟「该有的样子」一致 → 这次改写其实已经完整
+    #    落地了，只是删日志那一步失败。此时**绝不能回滚** —— 回滚会把
+    #    一次成功的迁移退回旧 key，而代码已经是新版本，正好凑成这套
+    #    机制要防的那个「状态旧、代码新」。只清理日志。
+    expected = txn.get("expected") or {}
+    if expected and all(_live_state_hash(n) == h for n, h in expected.items()):
+        log.extend(finish_state_transaction())
+        log.append("上次状态改写其实已经完整落地，只是事务日志没删掉；"
+                   "已核对每个文件都与预期一致，只清理了日志，未回滚任何状态。")
+        return log
     if not backup_dir.is_dir() or not names:
         log.append(
             f"⚠️  发现没走完的状态改写，但日志里的备份路径不可用"

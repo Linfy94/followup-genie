@@ -585,6 +585,112 @@ class WriteFailureAtEveryStepTest(unittest.TestCase):
                     f"「状态是新的、代码是旧的」——正是前五轮反复出现的那个 P0。")
 
 
+class JournalCleanupFailureMustNotRollBackTest(unittest.TestCase):
+    """
+    🔴 2026-08-21 第六轮复审：删事务日志失败时，迁移仍返回 0，日志留在盘上，
+    **下一次运行会把一次已经成功的迁移回滚掉** —— 状态退回旧 key、代码却是
+    新版，正好凑成这套机制本来要防的那个 P0。
+
+    根因是我把「日志还在」等同于「改写没走完」。但删日志本身也是一次可能
+    失败的写操作，所以「日志还在」混淆了两种**相反**的情况：
+      · 没改完就崩了        → 必须回滚
+      · 改完了只是没删掉日志 → 绝不能回滚
+
+    修法不是加一个「已提交」标志位（写标志位同样可能失败，窗口只是变小、
+    没消失），而是把「改完之后每个文件该长什么样」的指纹在动手之前就记进
+    日志 —— 恢复时**自己比对判断**处于哪种情况，不依赖任何一次可能失败
+    的写入。
+    """
+
+    def _sheet(self):
+        return _sheet([{"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+                       "目标国家地区": "欧洲"}])
+
+    def test_migration_still_succeeds_when_journal_cannot_be_deleted(self):
+        """删不掉日志不算迁移失败——状态已经完整落地，报失败会害安装器回滚代码。"""
+        old_key = "甲公司|杭州分行|46202‖欧洲"
+        seed = {"stage_entered.json": {f"trade_qq|{old_key}|fill_contact": "2026-08-01"}}
+        with temp_home(ledgers={"ledgers": [_ledger()]}, state=seed) as home:
+            real_unlink = core.Path.unlink
+
+            def flaky_unlink(self, *a, **k):
+                if self.name == core.STATE_TXN_FILE:
+                    raise OSError("模拟删除事务日志失败")
+                return real_unlink(self, *a, **k)
+
+            with mock.patch.object(core, "read_ledger_sheet", return_value=self._sheet()), \
+                 mock.patch.object(core.Path, "unlink", flaky_unlink), \
+                 mock.patch.object(sys, "argv", ["m", "--apply"]):
+                code = migrate.main()
+            self.assertEqual(code, 0, "状态已完整落地，删不掉日志不该报成迁移失败")
+            self.assertEqual(
+                read_state(home, "stage_entered.json"),
+                {"trade_qq|甲公司|杭州分行|46202|fill_contact": "2026-08-01"},
+                "迁移本身要成功")
+            self.assertIsNotNone(read_state(home, core.STATE_TXN_FILE),
+                                "这条测试的前提就是日志没删掉")
+
+    def test_next_run_cleans_up_instead_of_rolling_back(self):
+        """
+        🔴 本条是这轮的核心：日志残留 + 状态其实已经完整 → 下一次运行
+        必须只清理日志，**绝不能回滚**。
+        """
+        old_key = "甲公司|杭州分行|46202‖欧洲"
+        new_key = "甲公司|杭州分行|46202"
+        seed = {"stage_entered.json": {f"trade_qq|{old_key}|fill_contact": "2026-08-01"}}
+        with temp_home(ledgers={"ledgers": [_ledger()]}, state=seed) as home:
+            real_unlink = core.Path.unlink
+
+            def flaky_unlink(self, *a, **k):
+                if self.name == core.STATE_TXN_FILE:
+                    raise OSError("模拟删除事务日志失败")
+                return real_unlink(self, *a, **k)
+
+            with mock.patch.object(core, "read_ledger_sheet", return_value=self._sheet()), \
+                 mock.patch.object(core.Path, "unlink", flaky_unlink), \
+                 mock.patch.object(sys, "argv", ["m", "--apply"]):
+                migrate.main()
+
+            migrated = read_state(home, "stage_entered.json")
+            self.assertEqual(migrated,
+                             {f"trade_qq|{new_key}|fill_contact": "2026-08-01"})
+
+            # ── 下一次运行（不再拦 unlink）：应当只清理日志，不回滚 ──
+            lines = core.recover_state_transaction()
+            self.assertEqual(
+                read_state(home, "stage_entered.json"), migrated,
+                "🔴 一次已经成功的迁移被回滚了——状态退回旧 key、代码却是新版，"
+                "正是这套机制要防的那个 P0")
+            self.assertIsNone(read_state(home, core.STATE_TXN_FILE),
+                             "清理完日志就该消失，否则每天都要重来一遍")
+            self.assertTrue(any("未回滚" in ln for ln in lines),
+                            f"要说清楚这次只是清理、没有回滚：{lines}")
+
+    def test_genuinely_half_written_state_still_rolls_back(self):
+        """
+        对照组：指纹对不上（真的没改完）时，回滚必须照常发生——
+        不能因为堵了误回滚，把真正需要回滚的场景也放过去。
+        """
+        with temp_home() as home:
+            state = home / "followup" / "state"
+            backup = state / ".migrate-rc15-backup-X"
+            backup.mkdir(parents=True)
+            old = {"box|3|test": "2026-02-09"}
+            (backup / "stage_entered.json").write_text(
+                json.dumps(old, ensure_ascii=False), encoding="utf-8")
+            # 实盘是半写的：既不是备份的样子，也不是"应有内容"的样子
+            core.write_state("stage_entered.json", {"box|3‖欧洲|test": "2026-02-09"})
+            core.write_state(core.STATE_TXN_FILE, {
+                "backup_dir": str(backup),
+                "files": ["stage_entered.json"],
+                "expected": {"stage_entered.json": "0" * 64},   # 故意对不上
+                "started_at": "x", "pid": 1,
+            })
+            core.recover_state_transaction()
+            self.assertEqual(read_state(home, "stage_entered.json"), old,
+                             "真的半写时必须照常回滚")
+
+
 class DailyRunRecoversInterruptedTransactionTest(unittest.TestCase):
     """
     🔴 事务日志真正的兜底在这里：**每日任务**必须在判定之前先收拾残局。
