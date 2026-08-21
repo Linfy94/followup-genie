@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -336,6 +337,30 @@ def run_setup(skill_dir: Path, runtime_home: Path, hermes: bool = False) -> None
         )
 
 
+# 🔴 跟 migrate_rc15_key_state.py 里的同名常量必须一致——这里特意不去
+# import 那个脚本（它是子进程跑的，bootstrap.py 一贯不依赖 scripts/ 下
+# 除 _manifest 之外的任何模块，保持"就算 core.py 坏了，装机本身还能跑"
+# 这条隔离性），所以两边各自定义，靠这条注释互相看得见对方。
+_MIGRATION_MARKER_FILE = "migrations_completed.json"
+_MIGRATION_ID = "rc15_key_tiebreakers"
+
+
+def _migration_already_done(runtime_home: Path) -> bool:
+    """
+    迁移干净跑完一次就不用再跑——见 migrate_rc15_key_state.py 里
+    `_mark_migration_done()` 的说明。跳过判断本身只读本地文件，
+    不联网、不需要凭证、不用取运行锁。
+    """
+    marker = runtime_home / "followup" / "state" / _MIGRATION_MARKER_FILE
+    if not marker.is_file():
+        return False
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False  # 标记文件本身读不出来，保守起见当作没做过，照常跑一次
+    return isinstance(data, dict) and _MIGRATION_ID in data
+
+
 def run_migration(skill_dir: Path, runtime_home: Path, hermes: bool = False) -> None:
     """
     升级时把 rc14 旧 key 迁到 rc15 新 key（见 migrate_rc15_key_state.py）。
@@ -350,8 +375,19 @@ def run_migration(skill_dir: Path, runtime_home: Path, hermes: bool = False) -> 
 
     只在**升级**（`snap is not None`，见 install_or_rollback）时调用；
     首次安装没有旧状态可迁，硬跑一次纯属徒增一次不必要的联网取数。
+
+    🔴 2026-08-21 第四轮复审又指出：迁移一旦真的跑成功过一次，往后
+    **每一次**升级都还会重新联网读一遍配了 key_tiebreakers 的台账——
+    多余，而且让日后所有升级都莫名其妙依赖一次跟那次改动毫无关系的
+    网络请求，网络或权限一抖就会把整次升级挡下来。现在先看
+    `migrations_completed.json` 这个标记，标记在就直接跳过，
+    不联网、不进子进程、不占运行锁。
     ═══════════════════════════════════════════════════════════════════
     """
+    if _migration_already_done(runtime_home):
+        print("ℹ️ rc15 主键迁移此前已完成，跳过（不重新联网核对）。")
+        return
+
     script = skill_dir / "scripts" / "migrate_rc15_key_state.py"
     if not script.is_file():
         raise BootstrapError(f"安装包不完整，缺少：{script}")

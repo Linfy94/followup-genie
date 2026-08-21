@@ -31,6 +31,28 @@ state_key 跟着变，stage_entered/followup_state/stage_history 里的历史
      锁只在真正写盘（`--apply`）时才取，纯读计划不需要。
      任何一步失败（台账读取失败、改名遇到冲突、抢不到锁）都必须让整个
      脚本非零退出——不能打印一堆"看起来在工作"的输出、最后却说"已写入"。
+
+🔴 2026-08-21 第四轮复审揪出一个更狠的组合拳：conflict（改名冲突）
+   原来的处理是"冲突的那条跳过、其余照常写入"——单独看没问题，但
+   `bootstrap.py` 看到迁移非零退出就会整体回滚，**而回滚只恢复代码，
+   状态文件已经写进去的那部分改不回来**。于是"冲突→部分写入→退出
+   非零→代码回滚"这条链走完，state 已经是新 key、代码却退回了旧版，
+   旧代码按旧规则找不到这批刚被改名的历史记录，当成新项目重新催办——
+   跟这整个迁移脚本要防的 P0 一模一样，只是换了个触发路径。
+   实测复现过：两条台账，一条正常改名、一条冲突，冲突的那条确实被
+   跳过了，但正常那条已经落盘，此时退出码非零。
+
+   修复：**只要出现任何一个冲突，整次迁移一个字节都不写**——跟
+   台账读取失败走同一条"全须全尾要么都成、要么都不动"的路径，
+   不再有"部分写入 + 非零退出"这种中间态。真正写盘之后如果还失败
+   （比如磁盘写到一半炸了），必须在还持着锁的状态下，用刚才那份
+   备份把所有受影响的文件整体复原，不能留半写状态给下一次运行去猜。
+
+   此外原来每次升级都会重新联网读一遍配置了 key_tiebreakers 的台账、
+   即使早就迁移完成——这既浪费，也让日后所有升级都莫名其妙依赖一次
+   跟本次改动无关的网络请求，网络或权限一抖就把整次升级挡住。改成
+   迁移成功后在状态目录里落一个"迁移已完成"的标记，`bootstrap.py`
+   升级时先看这个标记，标记在就完全跳过（不联网、不进子进程、不占锁）。
 ═══════════════════════════════════════════════════════════════════════
 
 用法：
@@ -47,6 +69,7 @@ state/.migrate-rc15-backup-<时间戳>/，不是覆盖式改名——铁律④
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from datetime import datetime
@@ -55,6 +78,13 @@ import core
 
 # state_key 形如 "ledger_id|key|node_id" 的三份共享状态文件。
 STATE_FILES = ("stage_entered.json", "followup_state.json", "stage_history.json")
+
+# 迁移一旦干净地跑完一次（零冲突、零读取失败），语义上就再也不会需要
+# 重跑——rc15 之后的代码从没生产过 rc14 式的旧 key，未来任何新增的
+# key_tiebreakers 台账从第一天起就是新 key，没有旧 key 可迁。这个标记
+# 让 bootstrap.py 往后每次升级都能跳过一次不必要的联网 + 抢锁。
+MIGRATION_MARKER_FILE = "migrations_completed.json"
+MIGRATION_ID = "rc15_key_tiebreakers"
 
 
 def snapshot_file_name(ledger_id: str) -> str:
@@ -191,6 +221,11 @@ def _run(*, apply: bool) -> int:
                 had_conflict = True
 
     if not any_plan:
+        # 🔴 标记只在真正的 --apply 下才落——dry-run 是"永远只读"的硬约束，
+        # 哪怕落的是一个空操作也不该碰，即便 write_state 本身会被只读闸门
+        # 挡住，语义上也不该在这条分支里去"尝试"写。
+        if apply and not had_read_failure:
+            _mark_migration_done()
         print("没有发现需要迁移的记录，状态文件与 rc15 主键规则已经一致。")
         return 1 if had_read_failure else 0
 
@@ -198,30 +233,54 @@ def _run(*, apply: bool) -> int:
         print("\n以上是计划，未写入任何文件。加 --apply 才会真正改写。")
         return 1 if had_read_failure else 0
 
-    if had_read_failure:
-        print("\n❌ 有台账取数失败，为避免只迁移一部分留下不一致的状态，本次不写入任何文件。"
-              "请解决取数问题后重跑。", file=sys.stderr)
+    # 🔴 读取失败、改名冲突，都是"这次没法把事情做全"——都必须走同一条
+    # 全须全尾的路径：一个字节都不写。冲突原来是"跳过冲突的那条、其余
+    # 照常写入"，单独看没问题，但 bootstrap.py 看到非零退出会整体回滚
+    # 代码、不会回滚已经写下去的状态，state 停在新 key、代码退回旧版，
+    # 旧代码按旧规则找不到这批刚改名的历史记录，当成新项目重新催办——
+    # 跟这个脚本要防的 P0 一模一样，只是换了个触发路径。见模块 docstring。
+    if had_read_failure or had_conflict:
+        reason = "有台账取数失败" if had_read_failure else "有记录改名遇到冲突"
+        print(f"\n❌ {reason}，为避免部分写入、跟安装器的代码回滚凑成半写状态，"
+              f"本次不写入任何文件。请解决后重跑。", file=sys.stderr)
         return 1
 
     backup_dir = core.state_dir() / f".migrate-rc15-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    for name in list(STATE_FILES) + [snapshot_file_name(lid) for lid in snapshots]:
+    write_names = list(STATE_FILES) + [snapshot_file_name(lid) for lid in snapshots]
+    for name in write_names:
         src = core.state_dir() / name
         if src.exists():
             shutil.copy2(src, backup_dir / name)
     print(f"\n已备份改写前的状态文件到 {backup_dir}")
 
-    for name in STATE_FILES:
-        core.write_state(name, state[name])
-    for lid, snap in snapshots.items():
-        core.write_state(snapshot_file_name(lid), snap)
-    print("已写入迁移后的状态文件。")
-
-    if had_conflict:
-        print("⚠️  部分记录因目标 key 已存在而跳过（见上方日志），需人工核对——"
-              "本次退出码仍非零，提醒不要当作完全成功。", file=sys.stderr)
+    try:
+        for name in STATE_FILES:
+            core.write_state(name, state[name])
+        for lid, snap in snapshots.items():
+            core.write_state(snapshot_file_name(lid), snap)
+    except Exception as e:
+        # 🔴 写到一半失败（比如磁盘写满）：单份文件的写入本身是原子的
+        # （write_state 内部 tmp+replace），但这一批文件加起来不是一次
+        # 事务——已经写完的那几份和还没写的那几份会不一致。全程仍在锁
+        # 保护下，用刚备份的内容把受影响的文件整体复原，不留半写状态。
+        for name in write_names:
+            backup_src = backup_dir / name
+            if backup_src.exists():
+                core.write_state(name, json.loads(backup_src.read_text(encoding="utf-8")))
+        print(f"\n❌ 写入状态文件时失败（{type(e).__name__}: {e}），"
+              f"已用刚才的备份把状态整体复原，没有留下半写状态。", file=sys.stderr)
         return 1
+
+    print("已写入迁移后的状态文件。")
+    _mark_migration_done()
     return 0
+
+
+def _mark_migration_done() -> None:
+    marker = core.read_state(MIGRATION_MARKER_FILE)
+    marker[MIGRATION_ID] = core.now_iso()
+    core.write_state(MIGRATION_MARKER_FILE, marker)
 
 
 if __name__ == "__main__":

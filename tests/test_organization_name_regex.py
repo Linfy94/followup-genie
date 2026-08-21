@@ -98,6 +98,33 @@ class MixedChineseEnglishUnaffectedTest(unittest.TestCase):
         self.assertIn("浙江" + "某某" + "有限公司", hits)
 
 
+class ParenthesizedRegionMarkerTest(unittest.TestCase):
+    """
+    🔴 2026-08-21 第四轮复审发现：带地区括号的企业全称完全漏检——
+    括号本身不在允许的字符范围内，会打断"紧邻后缀词"这条连续字符
+    要求，而这类写法在真实台账里很常见（"XX进出口贸易（宁波）有限
+    公司"这类，业务用来标注分公司/办事处所在地）。
+    """
+
+    def test_fullwidth_parens_no_space(self):
+        hits = _hit("浙江" + "进出口贸易（宁波）" + "有限公司" + "完成了安装")
+        self.assertIn("浙江" + "进出口贸易（宁波）" + "有限公司", hits)
+
+    def test_halfwidth_parens_no_space(self):
+        hits = _hit("贸易" + "(上海)" + "有限公司" + "完成了安装")
+        self.assertIn("贸易" + "(上海)" + "有限公司", hits)
+
+    def test_parens_with_surrounding_spaces(self):
+        """真实场景常见写法：括号前后各带一个空格。"""
+        hits = _hit("上海" + "XX (深圳) " + "有限公司" + "完成了安装")
+        self.assertIn("XX (深圳) " + "有限公司", hits)
+
+    def test_no_parens_still_works_unchanged(self):
+        """没有括号的写法必须继续正常命中——这条能力是可选追加，不是替换。"""
+        hits = _hit("浙江" + "某某" + "有限公司" + "完成了安装")
+        self.assertIn("浙江" + "某某" + "有限公司", hits)
+
+
 class KnownFalsePositiveTradeoffTest(unittest.TestCase):
     """
     🔴 这次改动**接受**这几类误报，不是漏改了：为了不漏掉真实客户名

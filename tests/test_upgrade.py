@@ -267,8 +267,15 @@ class BusinessDataIsUntouchedTest(unittest.TestCase):
             # 进程退出后不删，是所有取锁动作的共同副作用，不是这次升级
             # 独有的）。它是程序自己的锁基础设施，不是业务配置或状态，
             # 从"必须逐字节不变"的比对里单独排除，其余一个字节都不许变。
+            #
+            # 🔴 迁移这次真的干净跑完了一次（示例模板台账没配
+            # key_tiebreakers，属于"检查过、确认没有可迁移的"这种干净
+            # 完成），会落一个 migrations_completed.json 标记，往后升级
+            # 靠它跳过重复联网——这也是程序自己的运行记录，不是业务数据，
+            # 同样排除在"逐字节不变"之外。
             after = fingerprint(runtime)
             after.pop("followup/state/.run.lock.guard", None)
+            after.pop("followup/state/migrations_completed.json", None)
             self.assertEqual(after, before,
                              "🔴 升级动了业务的配置或状态")
             self.assertFalse((skill / "scripts" / "legacy_module.py").exists(),
@@ -566,6 +573,58 @@ class MigrationDuringUpgradeTest(unittest.TestCase):
                 self._install()
         self.assertEqual((self.dest / "VERSION").read_text(encoding="utf-8"),
                          "0.0.0-old\n", "🔴 迁移失败时旧版没有被放回来")
+
+
+class MigrationSkippedOnceMarkedDoneTest(unittest.TestCase):
+    """
+    🔴 2026-08-21 第四轮复审：迁移一旦真的跑成功过一次，往后每次升级都
+    还会重新联网读一遍配了 key_tiebreakers 的台账——多余，且让日后所有
+    升级都莫名其妙依赖一次跟那次改动毫无关系的网络请求。改成先看
+    migrations_completed.json 里的标记，标记在就直接跳过，不联网、
+    不进子进程、不占运行锁。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fg-mig-marker-")
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.skill = base / "skill"
+        self.runtime = base / "runtime"
+        bootstrap.copy_package(ROOT, self.skill)
+        (self.runtime / "followup" / "state").mkdir(parents=True)
+
+    def _write_marker(self, content):
+        marker = self.runtime / "followup" / "state" / "migrations_completed.json"
+        marker.write_text(json.dumps(content), encoding="utf-8")
+
+    def test_marker_present_skips_the_subprocess_entirely(self):
+        self._write_marker({"rc15_key_tiebreakers": "2026-08-21T09:00:00+08:00"})
+        with mock.patch.object(bootstrap.subprocess, "run") as run:
+            bootstrap.run_migration(self.skill, self.runtime, hermes=True)
+        run.assert_not_called()
+
+    def test_marker_absent_still_runs_the_subprocess(self):
+        with mock.patch.object(bootstrap.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 0)) as run:
+            bootstrap.run_migration(self.skill, self.runtime, hermes=True)
+        run.assert_called_once()
+
+    def test_marker_present_but_missing_this_migrations_id_still_runs(self):
+        """标记文件存在，但里面记的是别的一次性迁移——不能被误当成这次也做过。"""
+        self._write_marker({"some_other_future_migration": "2026-09-01T00:00:00+08:00"})
+        with mock.patch.object(bootstrap.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 0)) as run:
+            bootstrap.run_migration(self.skill, self.runtime, hermes=True)
+        run.assert_called_once()
+
+    def test_corrupt_marker_file_is_treated_as_not_done(self):
+        """标记文件本身读不出来，保守起见当作没做过，不能因为一份坏文件就永久跳过迁移。"""
+        marker = self.runtime / "followup" / "state" / "migrations_completed.json"
+        marker.write_text("{ 坏 json", encoding="utf-8")
+        with mock.patch.object(bootstrap.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 0)) as run:
+            bootstrap.run_migration(self.skill, self.runtime, hermes=True)
+        run.assert_called_once()
 
 
 if __name__ == "__main__":
