@@ -701,6 +701,138 @@ def write_state(name: str, data: dict) -> None:
             pass
 
 
+# ── 状态改写事务日志 ──────────────────────────────────────────────────
+#
+# ═══════════════════════════════════════════════════════════════════════
+# 🔴 2026-08-21 第五轮复审后的结构性修复。**这是为了终结一整类问题，
+#    不是再堵一个洞。**
+#
+# 前四轮复审报的是同一件事的四个出口：迁移改了状态、然后某一步失败、
+# 安装器只回滚代码不回滚状态 → 状态是新的、代码是旧的 → 旧代码按旧规则
+# 找不到刚改名的历史记录，把已经在催的项目当成新项目重新催一遍。
+#
+# 每轮的修法都是「把这个失败点也纳入保护」——第 4 轮补了「冲突」，
+# 第 5 轮补了「写完成标记」，而恢复动作自己失败仍然没人管。这个玩法
+# 必输：**每加一个写入动作，就是一个新的、可能漏掉的失败点**，靠人
+# 事先想全是不可能的。
+#
+# 换个思路：不再要求「预先想到会在哪炸」，改成「炸在哪都留得下痕迹」。
+#
+#   1. 备份做完 → 2. 写事务日志 → 3. 改状态 → 4. 写完成标记 → 5. 删日志
+#
+# 任何一步之后被打断（异常、断电、被强杀、磁盘满、甚至恢复动作自己
+# 失败），日志文件都还在盘上。下一个碰状态的进程看到它，就知道「上次
+# 有一次改写没走完」，照日志记的备份把那批文件整体复原即可 —— 不需要
+# 知道上次到底炸在第几步。
+#
+# 🔴 完成标记必须一起进这批文件。否则「4 写完、5 之前」被打断时，
+#    恢复会把状态退回迁移前，而标记还留着说「已迁移」，迁移再也不会
+#    重跑 —— 又一个状态与代码不一致，只是换了个方向。
+#
+# 🔴 恢复必须在**持锁**状态下做，且必须幂等（重复恢复 = 恢复一次）。
+# ═══════════════════════════════════════════════════════════════════════
+
+STATE_TXN_FILE = ".state-transaction.json"
+
+
+def pending_state_transaction() -> dict | None:
+    """
+    有没有没走完的状态改写。**纯读**，只读模式下也照常返回 ——
+    诊断模式要能「看见并报告」，只是不去修（修复动作见 recover_state_transaction）。
+    """
+    p = _state_path(STATE_TXN_FILE)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        # 🔴 日志本身坏了也**不能当没看见**：它存在就说明有一次改写没走完。
+        #    返回一个空壳，让调用方至少能报出来。
+        return {"backup_dir": "", "files": [], "damaged": True}
+    return data if isinstance(data, dict) else {"backup_dir": "", "files": [],
+                                                "damaged": True}
+
+
+def begin_state_transaction(backup_dir: Path, names: list[str]) -> None:
+    """
+    宣告「我要开始改这批状态文件了，改坏了照这个备份恢复」。
+
+    **必须在备份已经做完之后、第一次改写之前调用** —— 顺序反了，
+    日志会指向一份还不完整的备份。
+    """
+    if _block("begin_state_transaction"):
+        return
+    write_state(STATE_TXN_FILE, {
+        "backup_dir": str(backup_dir),
+        "files": list(names),
+        "started_at": now_iso(),
+        "pid": os.getpid(),
+    })
+
+
+def finish_state_transaction() -> None:
+    """全部改完（含完成标记）才调。删掉日志 = 宣告这次改写完整落地。"""
+    if _block("finish_state_transaction"):
+        return
+    try:
+        _state_path(STATE_TXN_FILE).unlink()
+    except OSError:
+        pass
+
+
+def recover_state_transaction() -> list[str]:
+    """
+    发现没走完的状态改写就照备份复原。返回人话日志（没事发生则为空）。
+
+    🔴 **必须在持锁状态下调用** —— 恢复本身就是一次批量改写，
+       跟每日任务并发跑就是两个进程同时写状态。
+
+    幂等：复原到备份内容后删日志；中途再被打断，日志还在，下次重来一遍，
+    结果一样。
+    """
+    txn = pending_state_transaction()
+    if txn is None:
+        return []
+    if _block("recover_state_transaction"):
+        # 只读模式不修 —— 但调用方仍拿得到 pending_state_transaction() 去报告。
+        return []
+
+    log: list[str] = []
+    backup_dir = Path(txn.get("backup_dir") or "")
+    names = txn.get("files") or []
+    if not backup_dir.is_dir() or not names:
+        log.append(
+            f"⚠️  发现没走完的状态改写，但日志里的备份路径不可用"
+            f"（{backup_dir or '(空)'}），无法自动复原，请人工核对状态文件。")
+        return log
+
+    for name in names:
+        src = backup_dir / name
+        live = _state_path(name)
+        if src.exists():
+            try:
+                write_state(name, json.loads(src.read_text(encoding="utf-8")))
+                log.append(f"已复原 {name}")
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+                log.append(f"⚠️  {name} 复原失败（{type(e).__name__}），"
+                           f"事务日志保留，下次运行会再试一次")
+                return log      # 🔴 日志不删，留给下一次重试
+        elif live.exists():
+            # 备份里没有 = 这个文件在改写之前根本不存在（完成标记就是这种）。
+            # 复原 = 让它回到「不存在」。铁律④不删文件，挪进备份目录留痕。
+            try:
+                live.rename(backup_dir / f"{name}.rolled-back")
+                log.append(f"已撤销新建的 {name}（挪进备份目录留痕）")
+            except OSError as e:
+                log.append(f"⚠️  {name} 撤销失败（{type(e).__name__}），"
+                           f"事务日志保留，下次运行会再试一次")
+                return log
+
+    finish_state_transaction()
+    log.append(f"上次状态改写没走完，已照备份 {backup_dir.name} 整体复原。")
+    return log
+
+
 # ── 健康记录 ──────────────────────────────────────────────────────────
 # 它抓的是别的机制都抓不到的那类失败：**根本没跑**。
 # 关机、休眠、gateway 没起来、cron 被误删 —— 这些连 stderr 都不会产生，

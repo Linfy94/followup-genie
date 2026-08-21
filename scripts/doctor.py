@@ -588,6 +588,15 @@ def check_state(doc: Doc) -> None:
         for d in core.STATE_DAMAGE:
             doc.add(BAD, "状态文件损坏",
                     d["message"] + "\n自检只报告不修复 —— 改名保留由下一次真实运行做")
+    # 🔴 上一次状态改写没走完（多半是升级迁移崩在半路）。自检只报告不修复，
+    #    跟上面的损坏文件同一条规矩 —— 修复是写入，属于真实运行的事。
+    txn = core.pending_state_transaction()
+    if txn is not None:
+        doc.add(BAD, "上一次状态改写没走完",
+                f"事务日志还在（备份：{txn.get('backup_dir') or '(日志已损坏，读不出)'}）。\n"
+                "这说明有一次状态改写崩在半路，当前状态可能是半写的。\n"
+                "下一次真实运行会在拿到锁之后自动照备份复原并告警；"
+                "在那之前，判定结果不可信。")
     if not se:
         doc.add(WARN, "还没有节点进入时间记录（stage_entered.json 为空）",
                 "说明还没跑过。首次运行会用「最新进展日期」初始化 —— 这是刻意的：\n"

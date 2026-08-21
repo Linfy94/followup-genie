@@ -21,6 +21,7 @@ migrate_rc15_key_state.py：rc14 旧 key → rc15 新 key 的一次性状态迁�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -428,6 +429,232 @@ class FailureReportingTest(unittest.TestCase):
             self.assertEqual(
                 read_state(home, "followup_state.json"),
                 {f"trade_qq|{old_key}|fill_contact": {"first_overdue": "2026-08-05"}})
+
+    def test_marker_write_failure_also_restores_the_already_written_state(self):
+        """
+        🔴 2026-08-21 第五轮复审指出：状态文件全部迁移成功后，程序才写
+        迁移标记——这一步原来在 try 块**外面**，不受上面那条 restore
+        逻辑保护。标记写入也是一次磁盘写入，没理由比前面那几次更可靠；
+        真炸在这一步：状态已经是新 key、标记没写成，脚本因未捕获异常
+        非零退出，bootstrap.py 只回滚代码——又是同一个"state 新、代码
+        旧"的 P0，只是挪到了流程最后一步。这条测试直接复现这个场景：
+        除了迁移标记本身，其余每一次 write_state 调用都放行。
+        """
+        s = _sheet([{"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+                    "目标国家地区": "欧洲"}])
+        old_key = "甲公司|杭州分行|46202‖欧洲"
+        state_seed = {"stage_entered.json": {f"trade_qq|{old_key}|fill_contact": "2026-08-01"}}
+        with temp_home(ledgers={"ledgers": [_ledger()]}, state=state_seed) as home:
+            real_write_state = core.write_state
+
+            def flaky_write_state(name, data):
+                if name == migrate.MIGRATION_MARKER_FILE:
+                    raise OSError("模拟标记文件写入失败")
+                return real_write_state(name, data)
+
+            with mock.patch.object(core, "read_ledger_sheet", return_value=s), \
+                 mock.patch.object(core, "write_state", side_effect=flaky_write_state), \
+                 mock.patch.object(sys, "argv", ["migrate_rc15_key_state.py", "--apply"]):
+                code = migrate.main()
+            self.assertNotEqual(code, 0, "标记没写成就不该显示成功")
+            self.assertEqual(
+                read_state(home, "stage_entered.json"),
+                {f"trade_qq|{old_key}|fill_contact": "2026-08-01"},
+                "🔴 标记写入失败时，已经改成新 key 的状态文件也必须被复原回旧 key，"
+                "否则安装器只回滚代码、留下 state 新代码旧的半升级状态")
+            self.assertIsNone(read_state(home, migrate.MIGRATION_MARKER_FILE),
+                             "标记本来就没写成，不该凭空出现")
+
+
+class WriteFailureAtEveryStepTest(unittest.TestCase):
+    """
+    🔴 2026-08-21 第五轮复审之后加的**穷举式**测试，用来终结一整类问题。
+
+    ═══════════════════════════════════════════════════════════════════
+    上面 FailureReportingTest 里那四条测试（读取失败 / 冲突 / 写到一半 /
+    写标记），是四轮复审一条一条堆出来的——**守的是同一条规矩，只是
+    每次换一个地方**。这种"列举失败点"的写法必输：每加一个写入动作，
+    就是一个新的、可能漏掉的失败点，而漏掉的那个总要等下一轮复审来提。
+
+    这条测试改成穷举：让第 1、2、3…N 次写入分别失败一遍，每次都断言
+    **状态目录逐字节回到起点**。新增写入点会自动被覆盖，不需要谁记得
+    补测试。
+
+    N 由程序自己跑出来（先数一遍干净运行有多少次写入），所以以后代码
+    多写一个文件，这条测试的轮数自动跟着涨。
+    ═══════════════════════════════════════════════════════════════════
+    """
+
+    def _sheet_and_ledger(self):
+        s = _sheet([{"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+                    "目标国家地区": "欧洲"},
+                   {"企业": "乙公司", "机构": "深圳分行", "访客时间": "46203",
+                    "目标国家地区": "日本"}])
+        return s, {"ledgers": [_ledger()]}
+
+    def _seed(self):
+        return {
+            "stage_entered.json": {
+                "trade_qq|甲公司|杭州分行|46202‖欧洲|fill_contact": "2026-08-01",
+                "trade_qq|乙公司|深圳分行|46203‖日本|fill_contact": "2026-08-02",
+            },
+            "followup_state.json": {
+                "trade_qq|甲公司|杭州分行|46202‖欧洲|fill_contact":
+                    {"first_overdue": "2026-08-05"},
+            },
+            "snapshot_last_trade_qq.json": {
+                "date": "2026-08-19",
+                "nodes": {"甲公司|杭州分行|46202‖欧洲": "fill_contact"},
+            },
+        }
+
+    def _fingerprint(self, home):
+        """
+        状态目录的内容指纹。
+
+        🔴 比的是**解析后的内容**，不是原始字节：复原是通过 write_state
+        重新写一遍的，它会把 JSON 统一成 indent=1，而测试脚手架播种时没
+        缩进——字节必然不同，含义完全一样。这里要守的是"状态含义没变"，
+        拿字节比会把一次正确的复原判成失败。
+
+        跳过锁文件和备份目录：前者是锁的基础设施，后者是刻意留痕的新增，
+        都不算"状态被改动"。
+        """
+        out = {}
+        state = home / "followup" / "state"
+        for p in sorted(state.rglob("*")):
+            if not p.is_file() or p.name.startswith(".run.lock"):
+                continue
+            rel = str(p.relative_to(state))
+            if rel.startswith(".migrate-rc15-backup-"):
+                continue
+            try:
+                out[rel] = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        return out
+
+    def _run_once(self, *, fail_on=None):
+        """
+        跑一次迁移。fail_on=None 表示不注入失败，返回写入次数；
+        fail_on=k 表示第 k 次 write_state 抛错，返回 (退出码, 起止指纹)。
+        """
+        s, ledgers = self._sheet_and_ledger()
+        with temp_home(ledgers=ledgers, state=self._seed()) as home:
+            before = self._fingerprint(home)
+            calls = {"n": 0}
+            real_write_state = core.write_state
+
+            def counting_write_state(name, data):
+                calls["n"] += 1
+                if fail_on is not None and calls["n"] == fail_on:
+                    raise OSError(f"模拟第 {fail_on} 次写入失败")
+                return real_write_state(name, data)
+
+            with mock.patch.object(core, "read_ledger_sheet", return_value=s), \
+                 mock.patch.object(core, "write_state",
+                                   side_effect=counting_write_state), \
+                 mock.patch.object(sys, "argv",
+                                   ["migrate_rc15_key_state.py", "--apply"]):
+                code = migrate.main()
+            return code, before, self._fingerprint(home), calls["n"]
+
+    def test_a_clean_run_actually_migrates(self):
+        """先证明这批数据在不注入失败时确实会迁移——否则下面全是假绿。"""
+        code, before, after, writes = self._run_once()
+        self.assertEqual(code, 0)
+        self.assertNotEqual(before, after, "干净运行就该改动状态，否则这组测试没意义")
+        self.assertGreaterEqual(writes, 3, "至少要写 stage_entered/snapshot/标记")
+
+    def test_failure_at_any_single_write_leaves_state_untouched(self):
+        """
+        核心断言：不管炸在第几次写入，状态目录都必须逐字节回到起点。
+
+        🔴 这条测试的价值不在于它现在覆盖了几个点，而在于**以后新增
+           写入点会自动进入覆盖范围**——不需要有人记得回来补一条。
+        """
+        _, _, _, total_writes = self._run_once()
+        for k in range(1, total_writes + 1):
+            with self.subTest(第几次写入=k):
+                code, before, after, _ = self._run_once(fail_on=k)
+                self.assertNotEqual(code, 0, f"第 {k} 次写入失败了却显示成功")
+                self.assertEqual(
+                    after, before,
+                    f"🔴 第 {k} 次写入失败后，状态目录没有回到起点。"
+                    f"安装器只回滚代码不回滚状态，这会留下"
+                    f"「状态是新的、代码是旧的」——正是前五轮反复出现的那个 P0。")
+
+
+class DailyRunRecoversInterruptedTransactionTest(unittest.TestCase):
+    """
+    🔴 事务日志真正的兜底在这里：**每日任务**必须在判定之前先收拾残局。
+
+    迁移崩在半路留下日志之后，下一个碰状态的进程未必是"重跑一次迁移"——
+    更可能是第二天早上 9 点的定时任务。它要是不检查就直接判定，那份半写
+    状态就被当成事实用掉了，日志留着也没意义。
+    """
+
+    def _seed_interrupted(self, home):
+        """造一个"迁移崩在半路"的现场：备份是旧内容，实盘是新 key。"""
+        state = home / "followup" / "state"
+        backup = state / ".migrate-rc15-backup-20260821-000000"
+        backup.mkdir(parents=True, exist_ok=True)
+        old = {"box|3|efficiency_test": "2026-02-09"}
+        (backup / "stage_entered.json").write_text(
+            json.dumps(old, ensure_ascii=False), encoding="utf-8")
+        # 实盘已经被改成新 key（半写状态）
+        (state / "stage_entered.json").write_text(
+            json.dumps({"box|3‖欧洲|efficiency_test": "2026-02-09"},
+                       ensure_ascii=False), encoding="utf-8")
+        (state / core.STATE_TXN_FILE).write_text(
+            json.dumps({"backup_dir": str(backup),
+                        "files": ["stage_entered.json"],
+                        "started_at": "2026-08-21T00:00:00+08:00",
+                        "pid": 1}, ensure_ascii=False), encoding="utf-8")
+        return old
+
+    def test_real_run_recovers_before_judging(self):
+        from harness import make_sheet, row, days_ago, run_main
+        from datetime import date
+        today = date(2026, 7, 20)
+        sheet = make_sheet([row(1, "甲公司", tech="待收资",
+                               reported=days_ago(today, 40),
+                               progress=days_ago(today, 40))])
+        with temp_home() as home:
+            old = self._seed_interrupted(home)
+            r = run_main([f"--today={today.isoformat()}", "--force-push"], sheet)
+            after = read_state(home, "stage_entered.json")
+            # 复原之后判定照常进行，会写下它自己的新条目——所以不能整份相等，
+            # 要断言的是"半写的那个 key 没了、旧的那个回来了"。
+            self.assertNotIn("box|3‖欧洲|efficiency_test", after,
+                             "🔴 半写状态必须被复原掉，不能被当成事实用下去")
+            for k, v in old.items():
+                self.assertEqual(after.get(k), v,
+                                 "🔴 复原必须把改写前的记录原样放回来")
+            self.assertIsNone(read_state(home, core.STATE_TXN_FILE),
+                             "复原完事务日志就该消失")
+            self.assertTrue(r.alerted, "崩过一次是重大事件，必须告警")
+
+    def test_diagnostic_run_reports_but_does_not_repair(self):
+        """
+        --dry-run 是"永远只读"的硬约束：看得见、报得出，但不动手。
+        修复属于写入，只能由真实运行做（跟损坏状态文件的隔离同一条规矩）。
+        """
+        from harness import make_sheet, row, days_ago, run_main
+        from datetime import date
+        today = date(2026, 7, 20)
+        sheet = make_sheet([row(1, "甲公司", tech="待收资",
+                               reported=days_ago(today, 40),
+                               progress=days_ago(today, 40))])
+        with temp_home() as home:
+            self._seed_interrupted(home)
+            run_main(["--dry-run"], sheet)
+            self.assertEqual(
+                read_state(home, "stage_entered.json"),
+                {"box|3‖欧洲|efficiency_test": "2026-02-09"},
+                "🔴 诊断模式不许动现场")
+            self.assertIsNotNone(read_state(home, core.STATE_TXN_FILE),
+                                "事务日志也要原样留着")
 
 
 class MigrationMarkerTest(unittest.TestCase):

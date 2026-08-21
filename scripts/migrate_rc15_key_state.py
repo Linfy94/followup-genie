@@ -185,6 +185,16 @@ def main() -> int:
 def _run(*, apply: bool) -> int:
     core.set_read_only(not apply)
 
+    # 🔴 先收拾上一次没走完的改写（如果有）。已持锁，是安全的时机。
+    #    只读模式下 recover 自己会被闸门挡住，所以单独报一声。
+    if apply:
+        for line in core.recover_state_transaction():
+            print(f"↩️ {line}")
+    elif core.pending_state_transaction() is not None:
+        print("⚠️  上一次状态改写没走完（存在事务日志）。"
+              "本次是只读预览，不做复原；加 --apply 会先复原再继续。",
+              file=sys.stderr)
+
     ledgers_cfg, _, _ = core.load_configs()
     ledgers = [l for l in ledgers_cfg.get("ledgers", []) if l.get("enabled")]
     state = {name: core.read_state(name) for name in STATE_FILES}
@@ -225,7 +235,15 @@ def _run(*, apply: bool) -> int:
         # 哪怕落的是一个空操作也不该碰，即便 write_state 本身会被只读闸门
         # 挡住，语义上也不该在这条分支里去"尝试"写。
         if apply and not had_read_failure:
-            _mark_migration_done()
+            # 这条分支没动过任何状态文件，所以标记写失败不会造成"状态新、
+            # 代码旧"——非零退出让安装器回滚代码，状态本来就还是旧的，
+            # 两边一致。不必开事务，但也不能裸崩成一屏堆栈。
+            try:
+                _mark_migration_done()
+            except Exception as e:
+                print(f"\n❌ 写迁移完成标记失败（{type(e).__name__}: {e}）。"
+                      f"本次没有改动任何状态文件，重跑即可。", file=sys.stderr)
+                return 1
         print("没有发现需要迁移的记录，状态文件与 rc15 主键规则已经一致。")
         return 1 if had_read_failure else 0
 
@@ -247,33 +265,50 @@ def _run(*, apply: bool) -> int:
 
     backup_dir = core.state_dir() / f".migrate-rc15-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    write_names = list(STATE_FILES) + [snapshot_file_name(lid) for lid in snapshots]
+    # 🔴 完成标记必须一起进这批文件。否则「状态和标记都写完了、但删事务
+    #    日志之前被打断」时，恢复会把状态退回迁移前、标记却留着说"已迁移"，
+    #    迁移再也不会重跑 —— 又一个状态与代码不一致，只是换了个方向。
+    write_names = (list(STATE_FILES)
+                   + [snapshot_file_name(lid) for lid in snapshots]
+                   + [MIGRATION_MARKER_FILE])
     for name in write_names:
         src = core.state_dir() / name
         if src.exists():
             shutil.copy2(src, backup_dir / name)
     print(f"\n已备份改写前的状态文件到 {backup_dir}")
 
+    # 🔴 备份做完之后、第一次改写之前，先宣告「要开始改了」。从这一刻起，
+    #    不管在哪一步被打断（异常、断电、被强杀、连下面的恢复动作自己
+    #    失败），盘上都留着事务日志，下一个碰状态的进程会照备份复原。
+    #    见 core.py 里「状态改写事务日志」那一段。
+    try:
+        core.begin_state_transaction(backup_dir, write_names)
+    except Exception as e:
+        # 🔴 日志自己都没写成，就绝不能开始改 —— 真改了再炸，盘上没有
+        #    任何痕迹说明"有一次改写没走完"，恢复机制整个失灵。
+        #    此刻一个字节都还没动，直接退出就是安全的。
+        print(f"\n❌ 写事务日志失败（{type(e).__name__}: {e}），"
+              f"未改动任何状态文件。请检查状态目录是否可写后重跑。", file=sys.stderr)
+        return 1
+
     try:
         for name in STATE_FILES:
             core.write_state(name, state[name])
         for lid, snap in snapshots.items():
             core.write_state(snapshot_file_name(lid), snap)
+        print("已写入迁移后的状态文件。")
+        _mark_migration_done()
     except Exception as e:
-        # 🔴 写到一半失败（比如磁盘写满）：单份文件的写入本身是原子的
-        # （write_state 内部 tmp+replace），但这一批文件加起来不是一次
-        # 事务——已经写完的那几份和还没写的那几份会不一致。全程仍在锁
-        # 保护下，用刚备份的内容把受影响的文件整体复原，不留半写状态。
-        for name in write_names:
-            backup_src = backup_dir / name
-            if backup_src.exists():
-                core.write_state(name, json.loads(backup_src.read_text(encoding="utf-8")))
+        # 就地复原一次。**即便这次复原自己也失败**，事务日志仍然留在盘上，
+        # 下一次运行（迁移重跑或每日任务启动）会再试一次 —— 这正是加日志
+        # 要买的东西：不再要求"预先想到会在哪炸"。
+        for line in core.recover_state_transaction():
+            print(f"    {line}")
         print(f"\n❌ 写入状态文件时失败（{type(e).__name__}: {e}），"
-              f"已用刚才的备份把状态整体复原，没有留下半写状态。", file=sys.stderr)
+              f"已按事务日志把状态整体复原，没有留下半写状态。", file=sys.stderr)
         return 1
 
-    print("已写入迁移后的状态文件。")
-    _mark_migration_done()
+    core.finish_state_transaction()
     return 0
 
 

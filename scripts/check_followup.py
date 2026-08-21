@@ -739,6 +739,25 @@ def main(argv: list[str] | None = None) -> int:
             if steal:
                 run_warnings.append(steal)
                 alert(f"⚠️ 项目跟进精灵：{steal}", output_cfg)
+            # 🔴 拿到锁之后、判定之前，先收拾上一次没走完的状态改写。
+            #    不做这一步，一次半途崩掉的迁移留下的半写状态会被今天的
+            #    判定当成事实用掉 —— 那正是事务日志要防的事。
+            #    见 core.py「状态改写事务日志」。
+            #
+            #    进 run_warnings 是**刻意**的，跟状态文件损坏走同一条路：
+            #    这是重大事件（一次升级崩在半路），当天不该记 last_full_success。
+            #    它是一次性的 —— 复原完日志就没了，明天恢复正常，
+            #    不会变成坑#8 那种「天天少一次成功记录」的假警报。
+            recovered = core.recover_state_transaction()
+            if recovered:
+                run_warnings.extend(recovered)
+                ok, why = alert(
+                    "🔴 项目跟进精灵：上一次状态改写没走完，已自动复原\n\n"
+                    + "\n".join(f"· {line}" for line in recovered)
+                    + "\n\n多半是上次升级迁移崩在半路。状态已退回改写前，"
+                      "备份未删除。请确认升级是否需要重做。",
+                    output_cfg)
+                core.update_health(alert_ok=ok, alert_detail=why)
         except core.LockBusy as e:
             # 不是故障，安静退出（退出码 0）。Hermes 那边表现为一次静默运行。
             # 但「上一次跑太久所以让路」这种情况要告警 —— 真卡死的话每天都会跳，
