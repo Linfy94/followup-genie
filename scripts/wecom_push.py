@@ -256,6 +256,10 @@ def _post(url: str, payload: dict) -> tuple[bool, str]:
             nethttp.fetch(req, timeout=20, idempotent=False)
             .decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
+        # 🔴 跟 qqdoc.py 同一个坑：HTTPError 本身是个类文件对象，不主动
+        # close() 就要等 GC 才收。cron 每天调，遇到 webhook 失效这类会
+        # 反复重试，长期攒下来一堆 ResourceWarning。
+        e.close()
         return False, f"HTTP {e.code}"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"

@@ -261,7 +261,15 @@ class BusinessDataIsUntouchedTest(unittest.TestCase):
             r = install()            # ← 升级
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-            self.assertEqual(fingerprint(runtime), before,
+            # 🔴 2026-08-21：升级现在会跑一次状态迁移（见 run_migration），
+            # 而迁移要跟每日任务共用运行锁——取锁本身会在 state/ 下留一个
+            # 空的 .run.lock.guard flock 文件（core._lock_metadata_guard，
+            # 进程退出后不删，是所有取锁动作的共同副作用，不是这次升级
+            # 独有的）。它是程序自己的锁基础设施，不是业务配置或状态，
+            # 从"必须逐字节不变"的比对里单独排除，其余一个字节都不许变。
+            after = fingerprint(runtime)
+            after.pop("followup/state/.run.lock.guard", None)
+            self.assertEqual(after, before,
                              "🔴 升级动了业务的配置或状态")
             self.assertFalse((skill / "scripts" / "legacy_module.py").exists(),
                              "🔴 升级后旧代码还在执行路径上")
@@ -487,7 +495,8 @@ class RollbackTest(unittest.TestCase):
                          "校验不过时不该产生任何改动，连快照目录都不该有")
 
     def test_successful_install_leaves_the_new_version(self):
-        with mock.patch.object(bootstrap, "run_setup", return_value=None):
+        with mock.patch.object(bootstrap, "run_setup", return_value=None), \
+             mock.patch.object(bootstrap, "run_migration", return_value=None):
             self._install()
         self.assertNotEqual((self.dest / "VERSION").read_text(encoding="utf-8"),
                             "0.0.0-old\n", "成功时就该是新版")
@@ -499,6 +508,64 @@ class RollbackTest(unittest.TestCase):
             with self.assertRaises(bootstrap.BootstrapError):
                 bootstrap.install_or_rollback(self.pkg, fresh, self.runtime)
         # 不崩即可；首次安装没有「原来那一版」可退
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 升级必须迁移旧状态（key_tiebreakers 的 rc14→rc15 主键漂移，见
+# migrate_rc15_key_state.py）——不然代码换了、状态没迁，第一次真跑就可能
+# 触发一批多余的首次催办。cron 本身不归 bootstrap 管（是装完后人手动注册
+# 的一次性动作），能补的窗口只有升级这个动作本身完成之前。
+# ══════════════════════════════════════════════════════════════════════
+
+class MigrationDuringUpgradeTest(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fg-mig-")
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.pkg = base / "pkg"
+        self.dest = base / "skill"
+        self.runtime = base / "runtime"
+        bootstrap.copy_package(ROOT, self.pkg)
+        bootstrap.copy_package(ROOT, self.dest)  # 现有的「旧版」
+        (self.dest / "followup").mkdir()
+
+    def _install(self, fresh=False):
+        dest = (Path(self.tmp.name) / "fresh") if fresh else self.dest
+        return bootstrap.install_or_rollback(self.pkg, dest, self.runtime)
+
+    def test_upgrade_calls_migration_after_setup_succeeds(self):
+        order = []
+        with mock.patch.object(bootstrap, "run_setup",
+                               side_effect=lambda *a, **k: order.append("setup")) as setup, \
+             mock.patch.object(bootstrap, "run_migration",
+                               side_effect=lambda *a, **k: order.append("migrate")) as mig:
+            self._install()
+        setup.assert_called_once()
+        mig.assert_called_once()
+        self.assertEqual(order, ["setup", "migrate"],
+                         "🔴 迁移必须在自检通过之后才做，不能颠倒")
+
+    def test_first_install_does_not_call_migration(self):
+        """首次安装没有旧状态可迁，硬跑一次纯属徒增一次不必要的联网取数。"""
+        with mock.patch.object(bootstrap, "run_setup", return_value=None), \
+             mock.patch.object(bootstrap, "run_migration", return_value=None) as mig:
+            self._install(fresh=True)
+        mig.assert_not_called()
+
+    def test_migration_failure_rolls_back_like_setup_failure(self):
+        """
+        迁移失败必须跟 run_setup 失败走同一条回滚路径——不能让新代码
+        留在旧状态上，那正是这个 P0 要防的事。
+        """
+        (self.dest / "VERSION").write_text("0.0.0-old\n", encoding="utf-8")
+        with mock.patch.object(bootstrap, "run_setup", return_value=None), \
+             mock.patch.object(bootstrap, "run_migration",
+                               side_effect=bootstrap.BootstrapError("迁移失败")):
+            with self.assertRaises(bootstrap.BootstrapError):
+                self._install()
+        self.assertEqual((self.dest / "VERSION").read_text(encoding="utf-8"),
+                         "0.0.0-old\n", "🔴 迁移失败时旧版没有被放回来")
 
 
 if __name__ == "__main__":

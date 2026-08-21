@@ -2044,6 +2044,12 @@ class Report:
         self.out_of_scope_detail: dict[str, int] = {}
         self.no_node = 0
         self.not_overdue = 0
+        # 🔴 2026-08-21 复审发现：主键撞车歧义冻结的行（见 evaluate_ledger
+        # 里 `if key is None` 分支）原来只写进 review_hints，没计进任何桶，
+        # 会让 accounted 少算、触发「各项之和 ≠ 总数，有行去向不明」的假警报——
+        # 而这批行不是去向不明，是"程序主动暂停催办、等人工核对"，两者
+        # 该分开报，不能用同一句"去向不明"警告去描述两种完全不同的情况。
+        self.identity_ambiguous = 0
         self.disabled_nodes: list[str] = []
         # warnings = 数据质量问题，会影响判定正确性 → 始终显示，不许藏进 --verbose
         self.warnings: list[str] = []
@@ -2056,7 +2062,7 @@ class Report:
     def accounted(self) -> int:
         return (len(self.due) + len(self.overdue_muted) + len(self.terminal)
                 + len(self.paused) + len(self.advanced) + self.out_of_scope
-                + self.no_node + self.not_overdue)
+                + self.no_node + self.not_overdue + self.identity_ambiguous)
 
     @property
     def in_scope_rows(self) -> int:
@@ -2192,7 +2198,9 @@ def row_key(sheet, row: int, fields: list[str], tiebreakers: list[str] | None = 
 
 
 def resolve_row_keys(sheet, rows: list[int], fields: list[str],
-                     tiebreakers: list[str] | None = None) -> dict[int, str]:
+                     tiebreakers: list[str] | None = None, *,
+                     ledger_id: str | None = None,
+                     existing_state_keys: set[str] | None = None) -> dict[int, str | None]:
     """
     给一批行统一算出最终主键。**这是 tiebreakers 唯一该被使用的入口**——
     别再直接给 row_key() 传 tiebreakers，那样算出来的 key 会漂移。
@@ -2219,13 +2227,31 @@ def resolve_row_keys(sheet, rows: list[int], fields: list[str],
     出现次数 > 1（真的撞车）的那几行，才追加 tiebreakers；其余行原样
     用基础 key。消歧字段从空变有值，因此只会影响真正撞车的那一小撮行。
 
-    🔴 残留的、更小众的风险没有完全消除：如果原本 singleton 的一行，
-    某天业务新增了一条相同基础 key 的记录（比如真的复购了），且这一行
-    自己的消歧字段本来就有值，它的 key 会在这一刻从「不带后缀」变成
-    「带后缀」——这仍是一种漂移，但触发条件苛刻得多（需要「新增一行
-    同基础 key 记录」这个业务动作，不是每个项目迟早都会经历的填表流程），
-    且这本身就是「两个同名项目」这种场景固有的复杂度，不是这个函数
-    能单独兜底的。留作已知限制，不在本轮解决。
+    🔴 2026-08-21 复审指出，上面说的"残留风险"其实是真实 P0，已经复现：
+    一个原本 singleton、已经在 stage_entered/followup_state 里留了不带
+    后缀记录的项目，某天被新增的同基础 key 记录"撞车"——此时无法证明
+    这批同基础 key 的行里哪一行才是历史上那个已在催办的项目（谁先谁后、
+    谁是复购谁是笔误，光看这一刻的表格分不出来）。旧做法是不管三七
+    二十一，撞车的行统统套上带后缀的新 key：历史记录留在旧的不带后缀
+    key 下变成孤儿，新组的两行都被当成"从没出现过"，新项目正确触发
+    首次催办的同时，原来那个还在正常催办周期里的项目也被错误地当成
+    新项目再催一次。
+
+    `ledger_id` + `existing_state_keys`（调用方传入的、当前 stage_entered∪
+    followup_state∪stage_history 里出现过的完整 state_key 集合）用来
+    判断"这个基础 key 历史上是不是以不带后缀的形式存在过"。如果撞车
+    的同时历史上确实存在这样一条不带后缀的记录，代表这一撮行到底哪个
+    对应哪段历史，程序层面确实无法可靠判定——按"无法可靠判定就停止
+    催办、提示人工核对"的原则，这批行的 key 统一返回 `None`。
+
+    🔴 调用方看到 `None` 必须整行跳过催办与状态读写，绝不能把 `None`
+    直接拼进 state_key 字符串——那样会把所有歧义行错误地合并成同一条
+    记录，制造出新的串台。`evaluate_ledger()` 就是这么处理的，见那里
+    的 `if key is None` 分支。
+
+    不传 `ledger_id`/`existing_state_keys`（默认 `None`）时这条分支永远
+    不触发，行为与之前完全一致——`check_manual_lists()` 等不落盘状态的
+    调用方不受影响，无需改动。
     ═══════════════════════════════════════════════════════════════════
     """
     base = {r: row_key(sheet, r, fields) for r in rows}
@@ -2233,13 +2259,17 @@ def resolve_row_keys(sheet, rows: list[int], fields: list[str],
     for k in base.values():
         if k:
             dup_count[k] = dup_count.get(k, 0) + 1
-    result = {}
+    result: dict[int, str | None] = {}
     for r in rows:
         b = base[r]
-        if b and tiebreakers and dup_count.get(b, 0) > 1:
-            result[r] = row_key(sheet, r, fields, tiebreakers)
-        else:
+        if not (b and tiebreakers and dup_count.get(b, 0) > 1):
             result[r] = b
+            continue
+        historically_singleton = (
+            ledger_id is not None and existing_state_keys is not None
+            and any(k.startswith(f"{ledger_id}|{b}|") for k in existing_state_keys)
+        )
+        result[r] = None if historically_singleton else row_key(sheet, r, fields, tiebreakers)
     return result
 
 
@@ -2748,7 +2778,16 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
     # 那样算出来的 key 会随消歧字段的值漂移，state_key 跟着变，旧的
     # stage_entered/followup_state 记录查不到，项目被当成从没出现过，
     # 可能重发一次首次催办。见 resolve_row_keys() 的完整说明。
-    key_map = resolve_row_keys(sheet, rows, kfields, ktiebreakers)
+    #
+    # 🔴 existing_state_keys 传的是**当前所有仍留在三份状态文件里的
+    # state_key**（不分节点、不分是否属于这份台账，resolve_row_keys 内部
+    # 用 ledger_id 前缀自己过滤）。resolve_row_keys 拿它来判断"这个基础
+    # key 历史上是不是以不带后缀的形式存在过"——存在且现在撞车了，返回
+    # None，代表这一撮行的身份程序层面已经无法可靠判定。见该函数文档。
+    existing_state_keys = set(stage_entered) | set(followup_state) | set(stage_history)
+    key_map = resolve_row_keys(sheet, rows, kfields, ktiebreakers,
+                               ledger_id=ledger["id"],
+                               existing_state_keys=existing_state_keys)
 
     for r in rows:
         get_text = lambda f, _r=r: sheet.text(_r, f)  # noqa: E731
@@ -2774,6 +2813,19 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
                 rep.out_of_scope_detail[label] = rep.out_of_scope_detail.get(label, 0) + 1
                 skipped = True
         if skipped:
+            continue
+
+        # 1b) 主键身份有歧义（撞车前已有历史记录、无法判定哪行是哪行）：
+        # 这个项目本轮整个暂停催办，只提示人工核对——不猜、不拼、不写
+        # 任何状态。见 resolve_row_keys() 里 `None` 这个哨兵值的说明。
+        if key is None:
+            rep.identity_ambiguous += 1
+            rep.review_hints.append(
+                f"{name}：主键消歧字段（{'/'.join(ktiebreakers)}）撞车，"
+                f"撞车前已有项目在同一个基础主键下催办，无法判定这一撮"
+                f"记录里哪个对应哪段历史，本轮暂停催办（不是数据丢失），"
+                f"请人工核对后用消歧字段或数据修正消除歧义"
+            )
             continue
 
         # 2) 终止：范围内但已结束

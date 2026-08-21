@@ -244,8 +244,9 @@ def restore_snapshot(snapshot: Path, destination: Path) -> None:
 def install_or_rollback(source: Path, skill_dir: Path, runtime_home: Path,
                         *, hermes: bool = False) -> list[str]:
     """
-    先校验新版 → 存一份旧版 → 复制 → 跑 setup 自检。
-    任何一步失败都把旧版原样放回去，绝不让定时任务在半升级的代码上跑。
+    先校验新版 → 存一份旧版 → 复制 → 跑 setup 自检 → （升级时）迁移旧状态。
+    任何一步失败都把旧版原样放回去，绝不让定时任务在半升级的代码或
+    未迁移的状态上跑。
     """
     verify_package(source)
     snap = snapshot_code(skill_dir)
@@ -253,6 +254,8 @@ def install_or_rollback(source: Path, skill_dir: Path, runtime_home: Path,
         retired = copy_package(source, skill_dir)
         _report_retired(retired)
         run_setup(skill_dir, runtime_home, hermes=hermes)
+        if snap is not None:  # 升级才需要迁移；首次安装没有旧状态
+            run_migration(skill_dir, runtime_home, hermes=hermes)
         return retired
     except BootstrapError:
         if snap is not None:
@@ -330,6 +333,50 @@ def run_setup(skill_dir: Path, runtime_home: Path, hermes: bool = False) -> None
     if result.returncode != 0:
         raise BootstrapError(
             f"安装程序未通过检查（退出码 {result.returncode}），已停止，未启用自动化。"
+        )
+
+
+def run_migration(skill_dir: Path, runtime_home: Path, hermes: bool = False) -> None:
+    """
+    升级时把 rc14 旧 key 迁到 rc15 新 key（见 migrate_rc15_key_state.py）。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-21 复审发现：这一步原来压根没接进安装流程——迁移脚本写好了，
+    但没人会在升级时真的调它。已装 rc14 的业务升级后，代码换了但状态没迁，
+    第一次真跑就可能触发一批多余的首次催办。定时任务本身不归 bootstrap
+    管（cron 是装完之后人手动注册的一次性动作），能补的窗口只有：**升级
+    这个动作本身完成之前**，把迁移做完、做不完就跟 run_setup 一样整体
+    失败回滚——不让新代码在旧状态上开始跑。
+
+    只在**升级**（`snap is not None`，见 install_or_rollback）时调用；
+    首次安装没有旧状态可迁，硬跑一次纯属徒增一次不必要的联网取数。
+    ═══════════════════════════════════════════════════════════════════
+    """
+    script = skill_dir / "scripts" / "migrate_rc15_key_state.py"
+    if not script.is_file():
+        raise BootstrapError(f"安装包不完整，缺少：{script}")
+
+    env = os.environ.copy()
+    env.pop("FOLLOWUP_HOME", None)
+    if hermes:
+        env["HERMES_HOME"] = str(runtime_home)
+    else:
+        env.pop("HERMES_HOME", None)
+        env["FOLLOWUP_HOME"] = str(runtime_home)
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--apply"],
+            cwd=str(skill_dir),
+            env=env,
+            check=False,
+        )
+    except OSError as exc:
+        raise BootstrapError(f"无法启动状态迁移：{exc}") from exc
+    if result.returncode != 0:
+        raise BootstrapError(
+            f"升级后的状态迁移未完成（退出码 {result.returncode}），已停止，"
+            f"不会让定时任务在未迁移的状态上跑。"
         )
 
 

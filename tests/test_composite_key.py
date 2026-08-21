@@ -282,6 +282,89 @@ class JudgementTest(unittest.TestCase):
 
 
 
+class EvaluateLedgerAmbiguityFreezeTest(unittest.TestCase):
+    """
+    evaluate_ledger()：撞车触发歧义冻结时，既不猜 key、也不碰任何状态文件。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-21 P0 复现场景②：一个项目（甲公司|杭州分行|46202）已经在
+    stage_entered/followup_state 里留了一条不带后缀的历史记录、正处在
+    超期催办周期中；今天新增了一行同基础 key 的记录（目标国家地区＝
+    「日本」，一条全新的、真实存在的并行线索）。这一撞车让两行的基础
+    key 从"历史上唯一"变成"现在有两行"——程序层面无法判定旧记录到底
+    对应哪一行，必须整体冻结、只报人工核对，而不是给两行都套上新 key
+    （那样会让旧记录变孤儿、两行都被当成新项目各催一次）。
+    ═══════════════════════════════════════════════════════════════════
+    """
+
+    def _sheet(self, rows):
+        return FakeSheet(["企业", "机构", "访客时间", "目标国家地区", "已确认"], rows)
+
+    def _ledger(self):
+        l = base_ledger(
+            key_field=["企业", "机构", "访客时间"], name_field="企业",
+            required_columns=["企业", "机构", "访客时间", "目标国家地区", "已确认"],
+            key_tiebreakers=["目标国家地区"])
+        l["id"] = "trade_qq"
+        return l
+
+    def _ruleset(self):
+        return {"nodes": [{
+            "id": "fillin", "name": "客户填表", "enabled": True,
+            "when": [{"field": "已确认", "op": "empty"}],
+            "clock": {"field": "访客时间"},
+            "threshold": {"days": 0, "boundary": "on"},
+            "repeat": {"days": 1},
+        }]}
+
+    def test_colliding_rows_are_frozen_not_silently_rekeyed(self):
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": TODAY,
+             "目标国家地区": "", "已确认": ""},
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": TODAY,
+             "目标国家地区": "日本", "已确认": ""},
+        ])
+        base_key = "甲公司|杭州分行|" + core.iso(TODAY)
+        state_key = f"trade_qq|{base_key}|fillin"
+        stage_entered = {state_key: core.iso(TODAY)}
+        followup_state = {state_key: {"first_overdue": core.iso(TODAY)}}
+        stage_history: dict = {}
+        wd = core.WorkdayCalc({"exclude_weekends": True, "exclude_holidays": False}, None)
+
+        with mock.patch.object(core, "read_ledger_sheet", return_value=s):
+            rep, _ = core.evaluate_ledger(
+                self._ledger(), self._ruleset(), wd, TODAY,
+                stage_entered, followup_state, {}, stage_history)
+
+        self.assertEqual(rep.due, [], "撞车歧义时不该有任何一行照常催办")
+        self.assertTrue(
+            any("甲公司" in h for h in rep.review_hints), rep.review_hints)
+        self.assertEqual(stage_entered, {state_key: core.iso(TODAY)},
+                         "冻结场景绝不能改写/新增任何 state_key，历史记录必须原样保留")
+        self.assertEqual(followup_state, {state_key: {"first_overdue": core.iso(TODAY)}})
+        self.assertEqual(rep.identity_ambiguous, 2, "两行都被冻结，都要计进这个桶")
+        self.assertEqual(
+            rep.accounted, rep.total_rows,
+            "🔴 2026-08-21 复审发现：冻结的行原来只写 review_hints，不计入任何桶，"
+            "会让 accounted 少算、触发「各项之和 ≠ 总数，有行去向不明」的假警报——"
+            "这批行不是去向不明，是主动暂停催办")
+
+    def test_same_two_rows_without_prior_history_disambiguate_normally(self):
+        """对照组：如果之前根本没有历史记录（比如两行本来就都是新的），不该被冻结。"""
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": TODAY,
+             "目标国家地区": "欧洲", "已确认": ""},
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": TODAY,
+             "目标国家地区": "日本", "已确认": ""},
+        ])
+        wd = core.WorkdayCalc({"exclude_weekends": True, "exclude_holidays": False}, None)
+        with mock.patch.object(core, "read_ledger_sheet", return_value=s):
+            rep, _ = core.evaluate_ledger(
+                self._ledger(), self._ruleset(), wd, TODAY, {}, {}, {})
+        self.assertEqual(len(rep.due), 2, "没有历史包袱时，两条并行线索该各自正常入催办")
+        self.assertEqual(rep.review_hints, [])
+
+
 class ScopeAwareKeyAssertionTest(unittest.TestCase):
     """
     🔴 主键断言只对**责任范围内**的行判致命。
@@ -447,6 +530,93 @@ class ResolveRowKeysTest(unittest.TestCase):
         ])
         fields = ["企业", "机构", "访客时间"]
         self.assertEqual(core.resolve_row_keys(s, [1], fields, ["目标国家地区"])[1], "")
+
+
+class ResolveRowKeysAmbiguityGuardTest(unittest.TestCase):
+    """
+    resolve_row_keys()：撞车前已有历史记录的基础 key，撞车后不能静默改名。
+
+    ═══════════════════════════════════════════════════════════════════
+    🔴 2026-08-21 第二轮复审指出的 P0：一个原本 singleton、已经在状态
+    文件里留了不带后缀记录的项目，被新增的同基础 key 记录撞车后，
+    旧实现不管三七二十一给两行都套上带后缀的新 key——历史记录在旧的
+    不带后缀 key 下变成孤儿，两行都被当成"从没出现过"，新项目正确
+    触发首次催办的同时，原来那个还在正常周期里的项目也被错误地当成
+    新项目再催一次。
+
+    这批测试直接对 resolve_row_keys() 断言：只要传了 ledger_id 与
+    existing_state_keys，撞车前历史上是 singleton 的基础 key，撞车后
+    该返回 None（"无法可靠判定，调用方必须整体跳过"），不能返回任何
+    带后缀的猜测值。
+    ═══════════════════════════════════════════════════════════════════
+    """
+
+    def _sheet(self, rows):
+        return FakeSheet(["企业", "机构", "访客时间", "目标国家地区"], rows)
+
+    def test_collision_after_prior_singleton_history_returns_none_for_both_rows(self):
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": ""},
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "日本"},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        tb = ["目标国家地区"]
+        existing = {"trade_qq|甲公司|杭州分行|46202|客户填表"}
+        keys = core.resolve_row_keys(s, [1, 2], fields, tb,
+                                     ledger_id="trade_qq",
+                                     existing_state_keys=existing)
+        self.assertIsNone(keys[1], keys)
+        self.assertIsNone(keys[2], keys)
+
+    def test_collision_without_prior_history_is_unaffected(self):
+        """撞车了，但这个基础 key 之前压根没在状态文件里出现过——正常消歧，不是歧义。"""
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "欧洲"},
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "日本"},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        tb = ["目标国家地区"]
+        keys = core.resolve_row_keys(s, [1, 2], fields, tb,
+                                     ledger_id="trade_qq",
+                                     existing_state_keys=set())
+        self.assertIsNotNone(keys[1])
+        self.assertIsNotNone(keys[2])
+        self.assertNotEqual(keys[1], keys[2])
+
+    def test_without_ledger_id_or_existing_keys_behavior_is_unchanged(self):
+        """不传这两个新参数（其余调用方）时，永远不触发歧义分支——向后兼容。"""
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": ""},
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "日本"},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        tb = ["目标国家地区"]
+        keys = core.resolve_row_keys(s, [1, 2], fields, tb)
+        self.assertIsNotNone(keys[1])
+        self.assertIsNotNone(keys[2])
+
+    def test_different_ledger_id_prefix_does_not_false_positive(self):
+        """historically_singleton 的判定要按 ledger_id 精确前缀匹配，不能跨台账误伤。"""
+        s = self._sheet([
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": ""},
+            {"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+             "目标国家地区": "日本"},
+        ])
+        fields = ["企业", "机构", "访客时间"]
+        tb = ["目标国家地区"]
+        existing = {"另一条台账|甲公司|杭州分行|46202|客户填表"}
+        keys = core.resolve_row_keys(s, [1, 2], fields, tb,
+                                     ledger_id="trade_qq",
+                                     existing_state_keys=existing)
+        self.assertIsNotNone(keys[1])
+        self.assertIsNotNone(keys[2])
 
 
 class TieBreakerFieldMustExistTest(unittest.TestCase):

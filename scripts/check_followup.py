@@ -500,6 +500,7 @@ def _render_report_tail(lines: list[str], rep: core.Report,
             f"范围外 {rep.out_of_scope}",
             f"未超期 {rep.not_overdue}",
             f"无待催节点 {rep.no_node}",
+            f"身份歧义待核对 {rep.identity_ambiguous}",
         ]
         lines.append("   " + " ｜ ".join(parts))
         if rep.out_of_scope_detail:
@@ -1168,6 +1169,7 @@ def _print_json(reports, today, write_on, failures, notices=None) -> None:
                     "advanced": len(r.advanced),
                     "out_of_scope": r.out_of_scope, "not_overdue": r.not_overdue,
                     "no_node": r.no_node,
+                    "identity_ambiguous": r.identity_ambiguous,
                 },
                 "disabled_nodes": r.disabled_nodes,
                 "warnings": r.warnings,

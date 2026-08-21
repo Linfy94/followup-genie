@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-build_release.unapproved_organizations()：纯英文缩写紧跟中文后缀也要认得出。
+build_release.unapproved_organizations()：各种大小写的英文缩写紧跟中文后缀都要认得出。
 
 ═══════════════════════════════════════════════════════════════════════
-🔴 2026-08-21 复审发现：原来的正则只认「2-60 个连续中文字符 + 公司后缀」，
-   三个大写英文字母紧跟中文公司后缀的写法完全漏检——前缀不含一个中文
-   字符，正则直接跳过整段。这不是当前已发现的泄露，是发布隐私守卫本身
-   不完整。
+🔴 2026-08-21 复审两轮：
 
-   补一条英文/数字前缀分支，**只认大写字母 + 数字**，不接受小写字母。
-   这是刻意的取舍：真实企业英文缩写几乎总是全大写（比如三个字母的
-   缩写、或数字+字母的缩写）；第一版试过大小写混合并允许内部空格，
-   结果连代码注释里"一个小写单词紧跟中文后缀词"这种纯属巧合的组合
-   也会被命中——只认大写把「一段普通英文散文」和「一个缩写」分开。
+第一轮发现：原来的正则只认「2-60 个连续中文字符 + 公司后缀」，纯英文
+缩写紧跟中文公司后缀完全漏检。补了英文前缀分支，但只认全大写——
+目的是排除代码注释里巧合的英文单词紧跟中文后缀词这类误报。
 
-🔴 本文件所有样例组织名都在**运行时拼接**，连注释里也不能写出完整
-   的组合——这个文件会被打包脚本自己的组织名扫描器扫到（正是它在
-   守的东西），扫描器不区分代码/注释/字符串字面量，纯粹按文件原始
-   字节扫，第一版把示例写进 docstring 说明文字里，同样被当场拦下来
-   报「疑似真实客户内容」。跟 rc10 那次 test_no_customer_names_in_repo.py
-   踩的坑是同一个道理，这次连注释都要断开来写。
+第二轮指出：大小写混合、全小写的真实品牌缩写写法（驼峰式品牌名、
+纯小写缩写），同样被"只认大写"漏掉——业务的态度很明确：**宁可构建
+失败后人工确认，也不能放过真实客户名**，这条优先级排在"避免误报"
+之上。这次改成不限制大小写。
+
+代价：英文常用单词紧跟中文后缀词这类误报会重新出现——常用单词与
+真实品牌缩写在字符特征上完全一样，正则分不出哪个更像公司名，这是
+纯文本匹配的理论极限。真触发了，处理成本很低（加白名单/改措辞），
+比漏掉真实客户名的代价小得多。下面 `KnownFalsePositiveTradeoffTest`
+就是在如实记录这个接受了的代价，不是在验证"不会误报"。
+
+🔴 本文件所有样例组织名都在**运行时拼接**，连注释/文档字符串里也
+   不能写出完整的组合——这个文件会被打包脚本自己的组织名扫描器扫到
+   （正是它在守的东西），扫描器读的是源码字节，不区分代码与文字说明。
+   跟 rc10 那次 test_no_customer_names_in_repo.py 踩的坑是同一个道理。
 ═══════════════════════════════════════════════════════════════════════
 """
 
@@ -53,11 +57,19 @@ def _hit(text: str) -> list[str]:
     return check(text.encode("utf-8"))
 
 
-class PureEnglishAbbreviationTest(unittest.TestCase):
-    """本次要补上的目标场景：纯英文缩写紧跟中文后缀。"""
+class EnglishAbbreviationAnyCaseTest(unittest.TestCase):
+    """本次要补上的目标场景：任意大小写的英文缩写紧跟中文后缀。"""
 
     def test_uppercase_prefix_is_caught(self):
         self.assertTrue(_hit("AB" + "C" + "有限公司" + "完成了安装"))
+
+    def test_lowercase_prefix_is_caught(self):
+        """🔴 这是第二轮复审补上的：全小写缩写此前会漏检。"""
+        self.assertTrue(_hit("ab" + "c" + "有限公司" + "完成了安装"))
+
+    def test_mixed_case_prefix_is_caught(self):
+        """🔴 这是第二轮复审补上的：驼峰式品牌名（iRobot 这类）此前会漏检。"""
+        self.assertTrue(_hit("i" + "Robot" + "有限公司" + "完成了安装"))
 
     def test_digit_letter_mix_is_caught(self):
         self.assertTrue(_hit("3" + "M" + "集团" + "完成了安装"))
@@ -86,18 +98,24 @@ class MixedChineseEnglishUnaffectedTest(unittest.TestCase):
         self.assertIn("浙江" + "某某" + "有限公司", hits)
 
 
-class LowercaseNotTreatedAsAbbreviationTest(unittest.TestCase):
+class KnownFalsePositiveTradeoffTest(unittest.TestCase):
     """
-    🔴 这是刻意的取舍，不是残留漏洞：只认大写是为了避免下面这类误报。
+    🔴 这次改动**接受**这几类误报，不是漏改了：为了不漏掉真实客户名
+    （abc/iRobot 这类），代价是这几个巧合场景会被命中，业务的优先级
+    是"宁可误报"，处理路径是加白名单/改措辞，不是继续收紧正则。
     """
 
-    def test_lowercase_word_adjacent_to_suffix_is_not_flagged(self):
-        """真实案例：这次调试时自己写的测试字符串意外触发过一次误报。"""
-        self.assertEqual(
-            _hit("some code variable_name and" + "集团" + " nothing"), [])
+    def test_lowercase_word_adjacent_to_suffix_is_now_flagged(self):
+        """
+        这行字符串本身之前是"不该被命中"的对照组，这次改动之后就该被
+        命中——用它来确认这次的取舍是刻意的、可预期的，不是意外回归。
+        """
+        self.assertTrue(
+            _hit("some code variable_name and" + "集团" + " nothing"))
 
-    def test_mixed_case_word_is_not_flagged(self):
-        self.assertEqual(_hit("Ab" + "c" + "有限公司"), [])
+
+class StillCleanCasesTest(unittest.TestCase):
+    """这几类跟这次改动无关，验证仍然干净——不是"缩写紧跟后缀"这个形状。"""
 
     def test_plain_chinese_sentence_without_org_name_is_clean(self):
         self.assertEqual(_hit("这只是普通的中文句子，没有任何组织名"), [])
