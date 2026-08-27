@@ -794,8 +794,119 @@ class DailyRunRecoversInterruptedTransactionTest(unittest.TestCase):
                 "既然判不清，就不该再动这个文件——原样留着让人查")
             self.assertIsNotNone(read_state(home, core.STATE_TXN_FILE),
                                 "事务日志必须留着，下次运行还要能再看到它")
-            self.assertIsNotNone(read_state(home, core.STATE_TXN_FILE),
-                                "事务日志也要原样留着")
+
+    def test_real_run_proceeds_when_already_complete_but_journal_delete_fails(self):
+        """
+        🔴 2026-08-24 自审发现：跟上一条刚好相反的场景——数据其实**已经
+        确认完整**（跟事务日志里记的"该有的样子"逐字节一致），只是删事务
+        日志这最后一步失败。这不算"判不清"：数据本身没问题，不能因为
+        清理失败就整体拒绝今天的催办。
+
+        跟 migrate_rc15_key_state.py 的 `_recover_only()` 同一个坑（原来
+        两处都是"先看日志还在不在"，而不是"先看数据完不完整"，顺序反了）。
+        """
+        from harness import make_sheet, row, days_ago, run_main
+        from datetime import date
+        today = date(2026, 7, 20)
+        sheet = make_sheet([row(1, "甲公司", tech="待收资",
+                               reported=days_ago(today, 40),
+                               progress=days_ago(today, 40))])
+        with temp_home() as home:
+            state = home / "followup" / "state"
+            new_content = {"box|3‖欧洲|efficiency_test": "2026-02-09"}
+            (state / "stage_entered.json").write_text(
+                json.dumps(new_content, ensure_ascii=False, indent=1), encoding="utf-8")
+            expected = {"stage_entered.json": hashlib.sha256(
+                core._state_bytes(new_content)).hexdigest()}
+            (state / core.STATE_TXN_FILE).write_text(json.dumps({
+                "backup_dir": str(state / "backup"), "files": ["stage_entered.json"],
+                "expected": expected,
+                "started_at": "2026-08-21T00:00:00+08:00", "pid": 1,
+            }, ensure_ascii=False), encoding="utf-8")
+
+            real_unlink = core.Path.unlink
+
+            def flaky_unlink(self_, *a, **k):
+                if self_.name == core.STATE_TXN_FILE:
+                    raise OSError("模拟删除事务日志失败")
+                return real_unlink(self_, *a, **k)
+
+            with mock.patch.object(core.Path, "unlink", flaky_unlink):
+                r = run_main([f"--today={today.isoformat()}", "--force-push"], sheet)
+
+            self.assertEqual(r.code, 0, r.err)
+            self.assertEqual(
+                read_state(home, "stage_entered.json").get(
+                    "box|3‖欧洲|efficiency_test"),
+                "2026-02-09",
+                "🔴 数据已确认完整，不该因为清理日志失败就被当成没走完而回滚")
+
+
+class RerunRefusesToStartOnTopOfUnresolvedTransactionTest(unittest.TestCase):
+    """
+    🔴 2026-08-24 自审发现：`_run(apply=True)` 的开头原来只打印
+    recover_state_transaction() 的日志、不看结果，直接往下走到
+    plan_ledger()——如果那次 recover 没能彻底解决（备份缺失、复原本身
+    又写失败，日志仍留着），就会在一份自己都不确定完不完整的状态上
+    再开一次新的迁移事务。这不是 bootstrap.py 会走到的路径（它出问题
+    时用的是专门的 --recover-only），但人手动重跑 `--apply` 时也不该
+    被放过去——判不清就停，跟这套机制其余每一处是同一条规矩。
+    """
+
+    def test_apply_refuses_when_prior_transaction_cannot_be_resolved(self):
+        s = _sheet([{"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+                    "目标国家地区": "欧洲"}])
+        old_key = "甲公司|杭州分行|46202‖欧洲"
+        broken = {f"trade_qq|{old_key}|fill_contact": "2026-08-01"}
+        state_seed = {"stage_entered.json": broken}
+        with temp_home(ledgers={"ledgers": [_ledger()]}, state=state_seed) as home:
+            # 日志指向一个根本不存在的备份目录——上一次的改写没法被复原。
+            (home / "followup" / "state" / core.STATE_TXN_FILE).write_text(
+                json.dumps({"backup_dir": str(home / "followup" / "state" / "不存在"),
+                          "files": ["stage_entered.json"],
+                          "started_at": "2026-08-21T00:00:00+08:00", "pid": 1},
+                          ensure_ascii=False), encoding="utf-8")
+            with mock.patch.object(core, "read_ledger_sheet", return_value=s), \
+                 mock.patch.object(sys, "argv", ["m", "--apply"]):
+                code = migrate.main()
+            self.assertNotEqual(code, 0, "上一次没能复原，不该在这份状态上开始新迁移")
+            self.assertEqual(read_state(home, "stage_entered.json"), broken,
+                             "既然拒绝了，就不该动这个文件")
+
+    def test_apply_proceeds_when_prior_transaction_was_already_complete(self):
+        """
+        对照组：上一次其实已经完整落地、只是清理日志失败——这不算"判不清"，
+        不该拦住新的迁移请求。
+        """
+        s = _sheet([{"企业": "甲公司", "机构": "杭州分行", "访客时间": "46202",
+                    "目标国家地区": "欧洲"}])
+        already_new = {"box|3|test": "2026-02-09"}   # 跟这次要迁移的台账无关，纯占位
+        with temp_home(ledgers={"ledgers": [_ledger()]}) as home:
+            state = home / "followup" / "state"
+            # 🔴 必须用 core.write_state 写（indent=1），不能用 temp_home 的
+            # state= 参数——那边落盘不带缩进，跟 expected 指纹的格式对不上，
+            # 会让 state_transaction_matches_expected 假性判否。
+            core.write_state("stage_entered.json", already_new)
+            expected = {"stage_entered.json": hashlib.sha256(
+                core._state_bytes(already_new)).hexdigest()}
+            (state / core.STATE_TXN_FILE).write_text(json.dumps({
+                "backup_dir": str(state / "backup"), "files": ["stage_entered.json"],
+                "expected": expected,
+                "started_at": "2026-08-21T00:00:00+08:00", "pid": 1,
+            }, ensure_ascii=False), encoding="utf-8")
+
+            real_unlink = core.Path.unlink
+
+            def flaky_unlink(self_, *a, **k):
+                if self_.name == core.STATE_TXN_FILE:
+                    raise OSError("模拟删除失败")
+                return real_unlink(self_, *a, **k)
+
+            with mock.patch.object(core, "read_ledger_sheet", return_value=s), \
+                 mock.patch.object(core.Path, "unlink", flaky_unlink), \
+                 mock.patch.object(sys, "argv", ["m", "--apply"]):
+                code = migrate.main()
+            self.assertEqual(code, 0, "已确认完整的旧改写不该拦住这次新的迁移")
 
 
 class MigrationMarkerTest(unittest.TestCase):

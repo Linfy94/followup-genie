@@ -767,6 +767,19 @@ def main(argv: list[str] | None = None) -> int:
             #    这是重大事件（一次升级崩在半路），当天不该记 last_full_success。
             #    它是一次性的 —— 复原完日志就没了，明天恢复正常，
             #    不会变成坑#8 那种「天天少一次成功记录」的假警报。
+            # 🔴 2026-08-24 自审发现：必须在调用 recover（它会改状态）**之前**
+            #    问这个问题。"数据已经完整" 这个结论一旦成立就不会再变——
+            #    它是纯读出来的；"完整"这条路径下唯一可能失败的动作是删
+            #    事务日志本身，删不掉不代表数据有问题。如果不预先记下这个
+            #    结论、只看 recover 跑完之后 pending_state_transaction() 还
+            #    在不在，会把一个已经确认安全的结果误判成"判不清"，平白
+            #    拒绝一整天的催办——跟 migrate_rc15_key_state.py 里
+            #    `_recover_only()` 同一个坑，同一个修法（见那边的说明）。
+            pending_before = core.pending_state_transaction()
+            was_already_complete = (
+                pending_before is not None
+                and core.state_transaction_matches_expected(pending_before))
+
             recovered = core.recover_state_transaction()
             if recovered:
                 run_warnings.extend(recovered)
@@ -776,7 +789,9 @@ def main(argv: list[str] | None = None) -> int:
                 #    必须整体拒绝，跟"判不清就别自称安全"是同一条规矩
                 #    （见 bootstrap.py 的 StateRecoveryUnsafe）。fail() 自己
                 #    会发告警、记 health，这里不重复发一遍。
-                if core.pending_state_transaction() is not None:
+                #    但"已经确认完整、只是删日志失败"不算判不清——数据
+                #    本身没问题，不能因为清理失败就整体拒绝今天的催办。
+                if not was_already_complete and core.pending_state_transaction() is not None:
                     core.release_lock(lock_path, lock_token)
                     lock_path = None
                     return fail(
@@ -785,11 +800,16 @@ def main(argv: list[str] | None = None) -> int:
                         "已停止本次运行，不会产生任何催办：\n"
                         + "\n".join(f"· {line}" for line in recovered),
                         output_cfg, code=1, real_run=True)
+                if was_already_complete:
+                    tail = ("\n\n数据本身已核对完整（是新版本认得的样子），"
+                            "只是清理事务日志这最后一步没走完，不影响本次判定的"
+                            "正确性——多半是磁盘权限或文件系统问题，值得看一眼。")
+                else:
+                    tail = ("\n\n多半是上次升级迁移崩在半路。状态已退回改写前，"
+                            "备份未删除。请确认升级是否需要重做。")
                 ok, why = alert(
-                    "🔴 项目跟进精灵：上一次状态改写没走完，已自动复原\n\n"
-                    + "\n".join(f"· {line}" for line in recovered)
-                    + "\n\n多半是上次升级迁移崩在半路。状态已退回改写前，"
-                      "备份未删除。请确认升级是否需要重做。",
+                    "🔴 项目跟进精灵：上一次状态改写没走完，已自动处理\n\n"
+                    + "\n".join(f"· {line}" for line in recovered) + tail,
                     output_cfg)
                 core.update_health(alert_ok=ok, alert_detail=why)
         except core.LockBusy as e:

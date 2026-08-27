@@ -235,22 +235,32 @@ def _recover_only() -> int:
         return 0
 
     # 🔴 必须在调用 recover（它会改状态）**之前**问这个问题——答案要的是
-    #    "崩溃现场当时是什么样"，不是"复原动作跑完之后是什么样"。
+    #    "崩溃现场当时是什么样"，不是"复原动作跑完之后是什么样"。这个
+    #    结论一旦成立就不会再变：它是纯读出来的，"完整"分支本身不改
+    #    任何状态文件，只尝试删日志——删不删得掉跟"数据是不是完整的"
+    #    是两件独立的事，不能混在一起判。
     was_already_complete = core.state_transaction_matches_expected(txn)
 
     for line in core.recover_state_transaction():
         print(line)
+
+    # 🔴 2026-08-24 自审发现：这里原来先看"日志删掉了没"，再看
+    #    was_already_complete——顺序反了。数据已经确认完整时，"完整"
+    #    分支唯一可能失败的动作是删日志本身（finish_state_transaction
+    #    返回警告，但不代表数据有问题）；此时日志依然留在盘上，
+    #    `pending_state_transaction()` 依然不是 None——如果先判这个，
+    #    会把一个已经确认安全的结果，误判成"判不清"，让 bootstrap.py
+    #    白白拒绝一次本该正常保留新代码的升级。已知安全的结论必须先判、
+    #    且不能被后续单纯的清理失败推翻。
+    if was_already_complete:
+        print("✅ 上一次改写其实已经完整落地——状态是新的，不需要回滚代码。")
+        return 2
 
     if core.pending_state_transaction() is not None:
         print("❌ 无法可靠判定/复原上一次的状态改写——备份或复原本身出了问题，"
               "状态可能处于不完整状态，需要人工核对（详见上面的日志，以及 "
               "state/.state-transaction.json 里指向的备份目录）。", file=sys.stderr)
         return 1
-
-    if was_already_complete:
-        print("✅ 上一次改写其实已经完整落地，只是清理日志没走完——"
-              "状态是新的，不需要回滚代码。")
-        return 2
 
     print("✅ 上一次改写没有走完，已照备份把状态整体复原——"
           "状态回到了旧版本认得的样子，可以放心回滚代码。")
@@ -263,8 +273,28 @@ def _run(*, apply: bool) -> int:
     # 🔴 先收拾上一次没走完的改写（如果有）。已持锁，是安全的时机。
     #    只读模式下 recover 自己会被闸门挡住，所以单独报一声。
     if apply:
+        # 同样的"先问后做"顺序（见 _recover_only()）：数据是不是已经完整，
+        # 要在 recover 动手之前就问，答案不能被后面单纯的清理失败推翻。
+        pending_before = core.pending_state_transaction()
+        was_already_complete = (
+            pending_before is not None
+            and core.state_transaction_matches_expected(pending_before))
         for line in core.recover_state_transaction():
             print(f"↩️ {line}")
+        # 🔴 2026-08-24 自审发现：这里原来只打印日志、不看结果，直接往下走
+        #    到 plan_ledger()——如果上面这次 recover 没能彻底解决（备份缺失、
+        #    复原本身又写失败，日志仍留着），就会在一份自己都不确定完不完整
+        #    的状态上再开一次新的迁移事务，把水搅得更浑。这不是自动化路径
+        #    （bootstrap.py 出问题时走的是专门的 --recover-only，已经在那边
+        #    正确处理），但人手动重跑这个脚本时也不该被放过去——判不清就
+        #    停，跟这一整套机制其余每一处是同一条规矩。"已经确认完整、
+        #    只是清理日志失败"不算判不清，不能拦。
+        if not was_already_complete and core.pending_state_transaction() is not None:
+            print("❌ 上一次状态改写没能彻底复原（见上面的日志），不能在这份"
+                  "还不确定完不完整的状态上开始新的迁移。请先人工核对"
+                  "state/.state-transaction.json 里指向的备份目录，解决后重跑。",
+                  file=sys.stderr)
+            return 1
     elif core.pending_state_transaction() is not None:
         print("⚠️  上一次状态改写没走完（存在事务日志）。"
               "本次是只读预览，不做复原；加 --apply 会先复原再继续。",
