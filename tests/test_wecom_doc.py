@@ -359,6 +359,59 @@ class ParseTest(Base):
         s = wecom_doc.Sheet(["企业", "进度", "企业"], {})
         self.assertEqual(s.duplicate_columns, ["企业"])
 
+    def test_leading_empty_cell_does_not_shift_columns(self):
+        """
+        🔴 实测踩过（GEO 主台账里一家企业名录入较晚、"序号"还没补的行）：
+           「序号」这一列是空的，行首就是连续两个 `|`（`||企业名...|8.28|`）。
+           旧写法 `.strip("|")` 会把这两个 `|` 一起当成外层边界吃掉，
+           序号这一空列凭空消失，后面每一列全部错位一格 ——
+           「企业」读到的其实是下一列「需求提出时间」的值，
+           企业名字本身被错位塞进了再后一列。
+        """
+        content = "\n".join([
+            "丙子表",
+            "|序号|企业|需求提出时间|",
+            "|---|---|---|",
+            "||D公司|8.28|",
+        ])
+        info = {"errcode": 0, "errmsg": "ok", "name": "x",
+                "sheets": [{"sheet_id": "S1", "title": "丙子表",
+                           "row_count": 1, "column_count": 3}]}
+        calls, fake = run_with([info, {"errcode": 0, "task_done": True,
+                                       "content": content}])
+        with mock.patch.object(wecom_doc, "wecom_cli_bin", return_value=EXE), \
+             mock.patch.object(wecom_doc.subprocess, "run", fake):
+            s = wecom_doc.read_sheet("https://doc.weixin.qq.com/sheet/y", "S1")
+        self.assertEqual(s.text(1, "序号"), "")
+        self.assertEqual(s.text(1, "企业"), "D公司")
+        self.assertEqual(s.text(1, "需求提出时间"), "8.28")
+
+    def test_trailing_empty_cell_does_not_lose_a_column(self):
+        """
+        确认空列不贴着行尾边界时不受影响（真实台账里，识别到的表头
+        后面通常还有一堆没用到的空列做填充，空列很少真的落在整行
+        最后一个字符上）——这条测试在修复前后都该是绿的，用来锁住
+        "只有贴边界的空列才会错位"这个判断，不是漏测。
+        """
+        content = "\n".join([
+            "丁子表",
+            "|企业|需求提出时间|结束优化时间|备注|",
+            "|---|---|---|---|",
+            "|A公司|8.28||有备注|",
+        ])
+        info = {"errcode": 0, "errmsg": "ok", "name": "x",
+                "sheets": [{"sheet_id": "S2", "title": "丁子表",
+                           "row_count": 1, "column_count": 4}]}
+        calls, fake = run_with([info, {"errcode": 0, "task_done": True,
+                                       "content": content}])
+        with mock.patch.object(wecom_doc, "wecom_cli_bin", return_value=EXE), \
+             mock.patch.object(wecom_doc.subprocess, "run", fake):
+            s = wecom_doc.read_sheet("https://doc.weixin.qq.com/sheet/y", "S2")
+        self.assertEqual(s.text(1, "企业"), "A公司")
+        self.assertEqual(s.text(1, "需求提出时间"), "8.28")
+        self.assertEqual(s.text(1, "结束优化时间"), "")
+        self.assertEqual(s.text(1, "备注"), "有备注")
+
 
 class ChildEnvTest(Base):
     """wecom-cli 同样是 #!/usr/bin/env node —— rc2/rc4 那个坑会原样重现。"""

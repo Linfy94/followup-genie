@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `1.0.0` · Hermes + macOS 已在生产环境运行；WorkBuddy 已由业务实机验证并持续使用。Windows 尚未验证，暂不支持。
+> `1.0.1` · Hermes + macOS 已在生产环境运行；WorkBuddy 已由业务实机验证并持续使用。Windows 尚未验证，暂不支持。
 
 ## 给业务：只复制下面这一段
 
@@ -304,7 +304,7 @@ FOLLOWUP_HOME="<运行时目录>" python3 scripts/watchdog.py --self-test       
 ⚠️ `holidays.json` 是全项目唯一需要人工年度维护的东西（国务院调休无法用规则推算）。
 过期时 `doctor` 会报警，**不会静默降级**。
 
-✅ **1.0.0 首次安装已自带核对过的 2026 年预设**：33 个放假日、6 个补班日，
+✅ **首次安装已自带核对过的 2026 年预设**：33 个放假日、6 个补班日，
 `covers_year: 2026`、`verified: true`。升级时如已有 `holidays.json`，`setup.sh`
 会跳过并逐字节保留，绝不覆盖业务自己维护的日期。
 

@@ -272,7 +272,19 @@ def _split_by_sheet(markdown: str, titles: list[str]) -> dict[str, list[str]]:
 
 
 def _cells(line: str) -> list[str]:
-    return [c.strip() for c in line.strip().strip("|").split("|")]
+    """
+    🔴 不能用 `.strip("|")` 去掉首尾的 `|`——它会把**连续多个** `|` 一起吃掉。
+       行首列（比如"序号"）恰好为空时，真实数据长这样：`||企业名|8.28|`，
+       两个 `|` 都贴着行首。`.strip("|")` 把这两个当成"外层边界"一起削掉，
+       序号那一空列凭空消失，后面每一列全部错位一格 —— 企业名读成了下一列
+       的值，不报错，只是数据静默串位。只删首尾各一个真正的边界 `|`。
+    """
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
 
 
 def _is_separator(line: str) -> bool:
