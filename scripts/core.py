@@ -2088,8 +2088,12 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
                     f"{' 等' if len(unparsable) > 5 else ''}"
                 )
             else:
+                # 🔴 外部审查指出：这几行虽然不是「整列全废」，但一样会被
+                #    依赖该列的节点静默跳过——「只跳过几行」不代表风险小，
+                #    被跳过的那几行照样收不到催办。跟整列失效同一个量级，
+                #    通知策略不能因为数量少就降级成温和提示。
                 a.warnings.append(
-                    f"{f} 有 {len(unparsable)} 行有内容但解析不出日期"
+                    f"🔴 {f} 有 {len(unparsable)} 行有内容但解析不出日期"
                     f"（{', '.join(unparsable[:8])}"
                     f"{' 等' if len(unparsable) > 8 else ''}）。"
                     f"这些行在依赖该列的节点上会被跳过。"
@@ -2127,8 +2131,16 @@ def assert_sheet(sheet: qqdoc.Sheet, ledger: dict, ruleset: dict) -> Assertions:
         unknown = sorted(v for v in seen if v and v not in allowed)
         if unknown:
             where = "全表" if field in scope_fields else "责任范围内未终止的行"
+            # 🔴 外部审查指出：field 在 scope_fields 里时，这条警告说的
+            #    「会被静默丢掉」不是夸张——它就是「深圳分行」写成「深圳」
+            #    导致整表落空那道护栏的日常形态，只是这次没有严重到整表
+            #    落空，只丢了写法对不上的那几行。丢的是催办对象，跟整表
+            #    落空同一个量级，必须按关键问题处理。非 scope_filters 字段
+            #    （比如状态列）只影响该字段自己的判定，不代表整行会被
+            #    排除出催办范围，维持温和级别。
+            loud = "🔴 " if field in scope_fields else ""
             a.warnings.append(
-                f"{field} 出现未知取值 {unknown}（已知：{allowed}；查的是{where}）。"
+                f"{loud}{field} 出现未知取值 {unknown}（已知：{allowed}；查的是{where}）。"
                 f"若该列用于范围过滤，这些行会被静默丢掉——请确认是否写法不统一。"
             )
 

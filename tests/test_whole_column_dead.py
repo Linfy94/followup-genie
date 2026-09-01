@@ -63,12 +63,23 @@ class WholeColumnTest(unittest.TestCase):
 
     def test_partial_failure_keeps_the_ordinary_wording(self):
         """
-        只坏几行是数据质量问题，不是节点停摆。
-        用整列那套措辞会制造狼来了 —— 而这个项目最怕的就是没人再看告警。
+        只坏几行是数据质量问题，不是节点停摆，措辞上不该跟"整列失效"
+        混为一谈——用那套措辞会制造狼来了。
+
+        🔴 但"措辞不同"不等于"不严重"（2026-09-01 外部审查指出）：
+        被解析失败的那几行照样会被依赖该列的节点跳过，一样收不到催办，
+        跟整列失效是同一个量级，只是范围小。见下面
+        test_partial_failure_is_still_loud。
         """
         said = _joined([date(2026, 8, 1), date(2026, 8, 2), self.BAD])
         self.assertNotIn("整列失效", said)
         self.assertIn("解析不出日期", said)
+
+    def test_partial_failure_is_still_loud(self):
+        """只坏几行也必须带 🔴——那几行照样漏催，跟整列失效同一个量级。"""
+        said = _joined([date(2026, 8, 1), date(2026, 8, 2), self.BAD])
+        self.assertTrue(check_followup._is_loud(said.strip()),
+                        f"部分行解析失败必须是关键问题：{said!r}")
 
     def test_healthy_column_says_nothing(self):
         said = _joined([date(2026, 8, 1), date(2026, 8, 2)])

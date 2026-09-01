@@ -5,7 +5,7 @@ description: 项目跟进精灵 —— 流程节点催办。按业务台账判�
 
 # 项目跟进精灵 🧚
 
-版本：`1.1.1`。Hermes + macOS 已在生产环境运行（腾讯文档、企业微信文档与飞书多维表格均已接通），WorkBuddy 已由业务实机验证并持续使用。要求 Python 3.9+，零第三方 Python 依赖。
+版本：`1.1.2`。Hermes + macOS 已在生产环境运行（腾讯文档、企业微信文档与飞书多维表格均已接通），WorkBuddy 已由业务实机验证并持续使用。要求 Python 3.9+，零第三方 Python 依赖。
 
 **依赖按数据源算**：腾讯文档只需 `TENCENT_DOCS_TOKEN`，完整步骤见 `docs/腾讯文档接入.md`；企业微信文档需 Node.js + `wecom-cli` 智能机器人，完整步骤见 `docs/企业微信文档接入.md`；飞书多维表格需 Node.js + `lark-cli`，完整步骤见 `docs/飞书多维表格接入.md`。三种身份和凭证不能混用。程序绝不自动安装命令行工具。Windows 尚未验证。
 

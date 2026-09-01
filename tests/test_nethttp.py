@@ -28,7 +28,7 @@ import socket
 import ssl
 import unittest
 import urllib.error
-from io import StringIO
+from io import BytesIO, StringIO
 from unittest import mock
 
 from harness import ledgers_cfg          # noqa: F401  把 scripts/ 挂上 sys.path
@@ -87,7 +87,11 @@ class PhaseClassifierTest(unittest.TestCase):
            漏判会把 401/403 这类凭证失效当成网络抖动重试，
            而 qqdoc 正靠 403 分支报「请重新扫码授权」。
         """
-        err = urllib.error.HTTPError("u", 403, "forbidden", {}, None)
+        # 🔴 fp 传 None 时 HTTPError.close() 在 Python 3.9 上会抛
+        #    KeyError('file')（tempfile.py 内部实现差异，3.14 上不会）；
+        #    传一个真的 BytesIO 规避掉，两边都能正常关闭，不留 ResourceWarning。
+        err = urllib.error.HTTPError("u", 403, "forbidden", {}, BytesIO(b""))
+        self.addCleanup(err.close)
         self.assertIsNone(nethttp.tls_failure_phase(err))
 
     def test_non_ssl_url_errors_are_left_alone(self):
@@ -180,7 +184,11 @@ class FallbackTest(unittest.TestCase):
         🔴 超时 / HTTP 错误不是传输层握手问题。在这里重试会让
            调用方原有的重试次数悄悄翻倍，也会掩盖真实错误。
         """
-        for err in (urllib.error.HTTPError("u", 403, "no", {}, None),
+        # 🔴 fp 传 None 时 HTTPError.close() 在 Python 3.9 上会抛
+        #    KeyError('file')；传真的 BytesIO 规避掉，见上面那条测试同款注释。
+        http_err = urllib.error.HTTPError("u", 403, "no", {}, BytesIO(b""))
+        self.addCleanup(http_err.close)
+        for err in (http_err,
                     urllib.error.URLError(socket.gaierror("dns")),
                     TimeoutError("timed out")):
             with self.subTest(err=type(err).__name__):

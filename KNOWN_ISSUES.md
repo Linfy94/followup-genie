@@ -1,6 +1,6 @@
 # 已知问题
 
-本文件对应 `1.1.1`。Hermes 与 WorkBuddy 两条路径已经业务实际使用验证；
+本文件对应 `1.1.2`。Hermes 与 WorkBuddy 两条路径已经业务实际使用验证；
 下面列的是仍然存在、需要留意的边界（如 Windows 未验证），不代表全部风险已清零。
 
 ## 业务测试前必须知道
@@ -79,6 +79,21 @@
    所以无法像腾讯文档那样跑完比对一次 `last_modify_time`。
    与飞书同样，只能靠 `wecom_doc.ALLOWED_SUBCOMMANDS` 这道命令白名单兜底
    —— 白名单里只有 `sheet_get_info` 和 `get_doc_content` 两个只读命令。
+
+## 已在 `1.1.2` 修复
+
+**第二轮外部审查发现的 1 个 P0 + 1 个 P2，均已复现修复，详见
+CHANGELOG.md：**
+
+- **两类漏催问题被错误归为普通提示**：1.1.1 的 🔴 分级机制只给"整列
+  失效"打了标签，漏了 `scope_filters` 字段未知取值（会静默丢掉部分行，
+  跟整表落空同一类只是范围小）和日期部分解析失败（依赖该列的节点会
+  跳过这些行）这两类同样会导致漏催的问题。现在都按关键问题处理，
+  非 `scope_filters` 字段的未知取值维持温和级别。新增 WorkBuddy 无
+  hermes 场景专项测试。
+- **测试自身的 ResourceWarning**：`tests/test_nethttp.py` 两处
+  `HTTPError` 测试资源没关闭，跨 Python 版本（3.9 vs 3.14）才能复现，
+  改用真实 `BytesIO` 而不是 `None` 作为 `fp` 并显式 `close()`。
 
 ## 已在 `1.1.1` 修复
 
