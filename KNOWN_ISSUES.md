@@ -1,6 +1,6 @@
 # 已知问题
 
-本文件对应 `1.0.1`。Hermes 与 WorkBuddy 两条路径已经业务实际使用验证；
+本文件对应 `1.1.0`。Hermes 与 WorkBuddy 两条路径已经业务实际使用验证；
 下面列的是仍然存在、需要留意的边界（如 Windows 未验证），不代表全部风险已清零。
 
 ## 业务测试前必须知道
@@ -79,6 +79,15 @@
    所以无法像腾讯文档那样跑完比对一次 `last_modify_time`。
    与飞书同样，只能靠 `wecom_doc.ALLOWED_SUBCOMMANDS` 这道命令白名单兜底
    —— 白名单里只有 `sheet_get_info` 和 `get_doc_content` 两个只读命令。
+
+## 已在 `1.1.0` 改动
+
+**数据质量诊断信息（known_values 出现未知取值这类）不再进企微推送，
+改走 telegram。** 业务反馈演示时看到一整段已知值枚举观感很差，这些
+内容本来是给排查用的。诊断信息一个字都没丢——终端 / `--verbose` /
+`--json` / `doctor.py` 四处原样保留，只是不再重复推进企微。telegram
+走的是已有的 `FOLLOWUP_ALERT_TARGET` 通道（之前只在系统性故障时用），
+不做去重，同一条问题会天天发一遍。详见 CHANGELOG.md。
 
 ## 已在 `1.0.1` 修复
 

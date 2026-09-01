@@ -57,13 +57,23 @@ class ScopeEmptiedAlertTest(unittest.TestCase):
             self.assertFalse(any(ALERT_MARK in " ".join(a) for a in second.alerts))
 
     def test_failed_alert_is_retried_and_not_deduplicated(self):
-        """告警没发出去不能登记为已告警，否则故障会永久静默。"""
+        """
+        告警没发出去不能登记为已告警，否则故障会永久静默。
+
+        🔴 这个 fixture 的「地点」写法（杭州分行）本身也不在 known_values
+           白名单里，2026-09-01 起 _notify_data_quality 会为它另发一条数据
+           质量提示——同一次 run_main 里 alert() 会被调用不止一次，
+           这条测试只关心「scope_emptied 那条」的重试次数，按消息内容筛出来数，
+           不能再数 alert() 总调用次数。
+        """
         with temp_home() as home:
             with mock.patch.object(check_followup, "alert",
                                    return_value=(False, "模拟发送失败")) as send:
                 run_main([f"--today={TODAY}", "--force-push"], all_out_of_scope())
                 run_main([f"--today={TODAY}", "--force-push"], all_out_of_scope())
-            self.assertEqual(send.call_count, 2,
+            scope_alerts = [c for c in send.call_args_list
+                           if ALERT_MARK in c.args[0]]
+            self.assertEqual(len(scope_alerts), 2,
                              "第一次没发出去，下一次真实运行必须重试")
             health = read_state(home, "health.json")
             self.assertNotIn("scope_emptied", health,

@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `1.0.1` · Hermes + macOS 已在生产环境运行；WorkBuddy 已由业务实机验证并持续使用。Windows 尚未验证，暂不支持。
+> `1.1.0` · Hermes + macOS 已在生产环境运行；WorkBuddy 已由业务实机验证并持续使用。Windows 尚未验证，暂不支持。
 
 ## 给业务：只复制下面这一段
 

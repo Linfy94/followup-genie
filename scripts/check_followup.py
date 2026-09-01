@@ -408,6 +408,36 @@ def _problems(rep: core.Report) -> list[str]:
     return out
 
 
+def _notify_data_quality(reports: list[core.Report], output_cfg: dict,
+                         real_run: bool) -> None:
+    """
+    把 _problems() 汇总的诊断信息发到 telegram（走 alert() 同一个通道），
+    不再塞进企微推送——见 render_wecom 里那段说明。
+
+    🔴 简化点，先说清楚：这里不做去重。同一条 known_values 漂移会每天
+       都发一遍，不像真正的故障告警那样有「同一故障已告警过不重复」这层
+       （那层挂在 health.json 的 last_failure 上，是 fail() 专属的机制，
+       这里没有对应的持久状态）。业务/开发者天天收到同一条能自己识别是
+       旧问题，暂时够用；真要去重得另起一份状态文件记「上次发过什么」，
+       目前没做。
+    """
+    items: list[str] = []
+    for r in reports:
+        for p in _problems(r):
+            items.append(f"{r.ledger_name}：{p}")
+    if not items:
+        return
+
+    text = "📋 项目跟进精灵 · 数据质量提示\n\n" + "\n".join(f"- {p}" for p in items)
+    if not real_run:
+        print(f"🔒 数据质量提示已拦截（试跑模式）—— 本该发 {len(items)} 条到 telegram",
+              file=sys.stderr)
+        return
+    ok, why = alert(text, output_cfg)
+    if not ok:
+        print(f"🔴 数据质量提示未发出（不影响本次判定）：{why}", file=sys.stderr)
+
+
 def render(reports: list[core.Report], today: date, write_on: bool,
            output_cfg: dict, verbose: bool = False,
            run_warnings: list[str] | None = None,
@@ -578,13 +608,13 @@ def render_wecom(reports: list[core.Report], today: date, output_cfg: dict,
                     L.append(f"------- {g['hint_text']} -------")
                 L.append(f"{i + 1}、{it.name} — 超期 {it.overdue_days} 天")
 
-        problems = [problem for report in section.reports
-                    for problem in _problems(report)]
-        if problems:
-            L.append("")
-            L.append("### ⚠️ 需要注意")
-            for p in problems:
-                L.append(f"- {p}")
+        # 🔴 2026-09-01：故障与数据质量问题（_problems）以前在这里逐条列出，
+        #    业务演示时看到一整段 known_values 已知值枚举，观感很差，而且
+        #    这些内容本来就不是给业务看的。改走 telegram（见 main() 里
+        #    dq_warnings 那段，走的还是同一个 alert() 通道）。
+        #    企微推送这份收窄成纯业务清单；诊断信息一个字都没丢——
+        #    终端 / --verbose / --json / doctor 四处原样保留，
+        #    这里少的只是「企微里再重复一遍」。
 
         # 🔴 停用节点**不进企微推送**（2026-08-18 业务决定）。
         #
@@ -993,6 +1023,14 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
     read_count = sum(r.total_rows for r in reports)
     muted_count = sum(len(r.overdue_muted) for r in reports)
     dq_warnings = sum(len(_problems(r)) for r in reports)
+
+    # 数据质量问题不再进企微（见 render_wecom 里的说明），改走 telegram——
+    # 走的是同一个 alert() 通道，跟真正的故障告警共用 FOLLOWUP_ALERT_TARGET，
+    # 但消息前缀不同（📋 不是 🔴），收件人一眼能分清是"业务台账写法要核对"
+    # 还是"任务本身跑挂了"。这里不判 total_due，跟企微是否有得推无关——
+    # GEO 那种「今天没有待催」但表头写法漂移了的情况，以前只能靠 --verbose
+    # 才看得见，现在天天有得推。
+    _notify_data_quality(reports, output_cfg, real_run)
 
     # ── 主通道投递 ──
     # 提到输出之前：投递不依赖渲染出来的文本，先做掉才能把「发没发出去」
