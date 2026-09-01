@@ -402,17 +402,39 @@ def _problems(rep: core.Report) -> list[str]:
     out = []
     if rep.accounted != rep.total_rows:
         out.append(
-            f"各项之和 {rep.accounted} ≠ 项目总数 {rep.total_rows}，有行去向不明，请检查"
+            f"🔴 各项之和 {rep.accounted} ≠ 项目总数 {rep.total_rows}，有行去向不明，请检查"
         )
     out.extend(rep.warnings)
     return out
 
 
+def _is_loud(problem: str) -> bool:
+    """
+    🔴 前缀标记的是可能直接导致漏催/催错的严重问题（整列失效、无可用
+    计时起点、整表被范围过滤掉、各项之和对不上）——跟"业务写法漂移"
+    这类温和提示（出现未知取值之类）不是一个量级，通知策略要分开：
+    前者必须有可靠的送达保证，后者走 telegram 就够了。
+    """
+    return problem.startswith("🔴")
+
+
 def _notify_data_quality(reports: list[core.Report], output_cfg: dict,
-                         real_run: bool) -> None:
+                         real_run: bool) -> bool:
     """
     把 _problems() 汇总的诊断信息发到 telegram（走 alert() 同一个通道），
     不再塞进企微推送——见 render_wecom 里那段说明。
+
+    返回值：是否存在"关键问题、且两个通道都没能送达"这种最坏情况。
+    调用方拿它决定要不要把 exit_code 顶成 1。
+
+    🔴 telegram 依赖 hermes send——WorkBuddy 装机不带 hermes，外部审查
+       指出：这样一来"整列失效"这类真正会漏催的关键问题，WorkBuddy 上
+       会彻底没人知道，业务收不到，也没有 telegram 兜底，只能靠有人
+       主动翻本地日志才发现，比改动前（好歹还会进企微）更差。
+       补法：只在"关键问题"（_is_loud）这个子集上，telegram 发不出去时
+       退到企微发一条简短摘要——不展示冗长枚举，只说清有几条、去哪查。
+       "业务写法漂移"这类温和提示不设兜底，telegram 发不出去就算了，
+       --verbose / doctor 里还在，不算数据丢失，只是不主动推给人看。
 
     🔴 简化点，先说清楚：这里不做去重。同一条 known_values 漂移会每天
        都发一遍，不像真正的故障告警那样有「同一故障已告警过不重复」这层
@@ -422,20 +444,47 @@ def _notify_data_quality(reports: list[core.Report], output_cfg: dict,
        目前没做。
     """
     items: list[str] = []
+    loud_items: list[str] = []
     for r in reports:
         for p in _problems(r):
-            items.append(f"{r.ledger_name}：{p}")
+            line = f"{r.ledger_name}：{p}"
+            items.append(line)
+            if _is_loud(p):
+                loud_items.append(line)
     if not items:
-        return
+        return False
 
     text = "📋 项目跟进精灵 · 数据质量提示\n\n" + "\n".join(f"- {p}" for p in items)
     if not real_run:
-        print(f"🔒 数据质量提示已拦截（试跑模式）—— 本该发 {len(items)} 条到 telegram",
+        print(f"🔒 数据质量提示已拦截（试跑模式）—— 本该发 {len(items)} 条到 telegram"
+              + (f"（其中 {len(loud_items)} 条是关键问题）" if loud_items else ""),
               file=sys.stderr)
-        return
+        return False
+
     ok, why = alert(text, output_cfg)
-    if not ok:
-        print(f"🔴 数据质量提示未发出（不影响本次判定）：{why}", file=sys.stderr)
+    if ok:
+        return False
+    print(f"🔴 数据质量提示未发出（不影响本次判定）：{why}", file=sys.stderr)
+    if not loud_items:
+        return False  # 只是温和提示，telegram 发不出去不设兜底
+
+    summary = (f"⚠️ 发现 {len(loud_items)} 项关键台账质量问题（telegram 未能送达），"
+              f"请联系维护人员核实：\n" + "\n".join(f"- {p}" for p in loud_items[:5])
+              + ("\n…" if len(loud_items) > 5 else ""))
+    try:
+        import wecom_push
+        res = wecom_push.push(summary, output_cfg, allowed=True, stream=sys.stderr)
+    except Exception as e:
+        print(f"🔴 数据质量兜底通知（企微）也失败：{type(e).__name__}: {e}", file=sys.stderr)
+        core.update_health(last_failure={"at": core.now_iso(), "stage": "数据质量告警",
+                                         "reason": f"telegram 与企微兜底均未送达：{why}"})
+        return True
+    if not res.ok:
+        print(f"🔴 数据质量兜底通知（企微）也没能送达：{res.summary()}", file=sys.stderr)
+        core.update_health(last_failure={"at": core.now_iso(), "stage": "数据质量告警",
+                                         "reason": f"telegram 与企微兜底均未送达：{why} / {res.summary()}"})
+        return True
+    return False
 
 
 def render(reports: list[core.Report], today: date, write_on: bool,
@@ -1024,19 +1073,30 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
     muted_count = sum(len(r.overdue_muted) for r in reports)
     dq_warnings = sum(len(_problems(r)) for r in reports)
 
+    # ── 主通道投递 ──
+    # 提到输出之前：投递不依赖渲染出来的文本，先做掉才能把「发没发出去」
+    # 一并写进下面那段输出里。企微那边一个字都没变，只是调用顺序前移。
+    #
+    # 🔴 必须排在数据质量通知**之前**：alert() 发 telegram 失败会重试
+    # 3 次，每次超时 30 秒、间隔再加 7 秒，最坏累计能拖住 97 秒——
+    # 数据质量通知本来就不是业务等着看的东西，不能让它的重试拖慢
+    # 业务真正在等的催办清单。外部审查指出这一点后调整的顺序。
+    delivered, delivery = _deliver(args, reports, today, output_cfg, primary,
+                                   total_due, real_run, workday)
+
     # 数据质量问题不再进企微（见 render_wecom 里的说明），改走 telegram——
     # 走的是同一个 alert() 通道，跟真正的故障告警共用 FOLLOWUP_ALERT_TARGET，
     # 但消息前缀不同（📋 不是 🔴），收件人一眼能分清是"业务台账写法要核对"
     # 还是"任务本身跑挂了"。这里不判 total_due，跟企微是否有得推无关——
     # GEO 那种「今天没有待催」但表头写法漂移了的情况，以前只能靠 --verbose
     # 才看得见，现在天天有得推。
-    _notify_data_quality(reports, output_cfg, real_run)
-
-    # ── 主通道投递 ──
-    # 提到输出之前：投递不依赖渲染出来的文本，先做掉才能把「发没发出去」
-    # 一并写进下面那段输出里。企微那边一个字都没变，只是调用顺序前移。
-    delivered, delivery = _deliver(args, reports, today, output_cfg, primary,
-                                   total_due, real_run, workday)
+    #
+    # 🔴 telegram 不可用时（典型是 WorkBuddy 装机没有 hermes），不能让
+    # "整列失效"这类真正会漏催的关键问题从此没人知道——_notify_data_quality
+    # 内部会在这种情况下退到企微发一条简短摘要兜底；两个通道都没送达
+    # 才会返回 True，这里据此把 exit_code 顶成 1，跟企微主通道投递失败
+    # 同一个判法：通知不到位和清单没送到一样严重。
+    dq_undelivered = _notify_data_quality(reports, output_cfg, real_run)
 
     if real_run:
         # 🔴 只在真实运行写。--dry-run 被只读闸门挡住，所以 doctor 比对的
@@ -1091,6 +1151,11 @@ def _run(args, today: date, real_run: bool, primary: str, output_cfg: dict,
             print("🔴 主通道未完整送达，本次不记「已通知」——"
                   "下次运行会把整批重发。重复消息业务能识别，静默漏催她发现不了。",
                   file=sys.stderr)
+
+        if dq_undelivered:
+            # telegram 和企微兜底两个通道都没能把关键数据质量问题送出去——
+            # 跟催办清单没送到同一个级别，同样不能算"干净成功"。
+            exit_code = exit_code or 1
 
         core.write_state("stage_entered.json", stage_entered)
         core.write_state("stage_history.json", stage_history)

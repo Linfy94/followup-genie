@@ -1,6 +1,6 @@
 # 项目跟进精灵 🧚
 
-> `1.1.0` · Hermes + macOS 已在生产环境运行；WorkBuddy 已由业务实机验证并持续使用。Windows 尚未验证，暂不支持。
+> `1.1.1` · Hermes + macOS 已在生产环境运行；WorkBuddy 已由业务实机验证并持续使用。Windows 尚未验证，暂不支持。
 
 ## 给业务：只复制下面这一段
 
@@ -163,7 +163,13 @@ python3 scripts/bootstrap.py --host hermes        # 或者装到 Hermes
 ```bash
 TENCENT_DOCS_TOKEN=          # 腾讯文档台账才需要：docs.qq.com →「更多操作 → 开放平台」→「OpenClaw 专用入口」扫码
 FOLLOWUP_WECOM_WEBHOOK=      # 要推企微群才需要。进群聊 → 群设置 → 群机器人 → 添加
-FOLLOWUP_ALERT_TARGET=       # 可选。故障告警发到哪，形如 telegram:<chat_id>
+FOLLOWUP_ALERT_TARGET=       # 建议配置。故障告警、以及"整列失效"这类关键数据质量问题
+                              # 走这里发到 telegram，形如 telegram:<chat_id>。不配也能跑，
+                              # 但没有它就完全依赖企微，遇到 telegram 该接的那类关键问题会
+                              # 只留在本地日志——telegram 依赖 hermes send，WorkBuddy 装机
+                              # 没有 hermes，这条变量在 WorkBuddy 上目前配不了，关键问题会
+                              # 退到企微发一条简短摘要兜底，温和的提示（比如台账里出现了没
+                              # 见过的写法）则只在 --verbose / doctor 里能看到。
 ```
 
 ⚠️ **下面只说明消息推送通道。** 推送机器人要在**群聊里**建，不是读取企微文档所用的

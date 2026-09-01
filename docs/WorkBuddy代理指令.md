@@ -6,7 +6,7 @@
 
 ---
 
-> `1.1.0`。Hermes + macOS 已在生产环境运行；WorkBuddy 已由业务实机验证并持续使用。
+> `1.1.1`。Hermes + macOS 已在生产环境运行；WorkBuddy 已由业务实机验证并持续使用。
 
 业务不需要懂 Git、代码或命令行，也不需要阅读本文件。
 
@@ -201,4 +201,4 @@ python3 scripts/check_followup.py --dry-run --verify-readonly
 ./run_tests.sh
 ```
 
-当前发布版本：`1.1.0`。真实凭证、业务配置、客户数据和状态不得进入仓库。
+当前发布版本：`1.1.1`。真实凭证、业务配置、客户数据和状态不得进入仓库。

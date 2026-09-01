@@ -3195,7 +3195,7 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
                                    state_key, last_snap_date, last_snap_node, node_id,
                                    seed=seed, seed_key=key)
         if start is None:
-            rep.warnings.append(f"{key} {name}：{current['name']} 无可用计时起点，跳过")
+            rep.warnings.append(f"🔴 {key} {name}：{current['name']} 无可用计时起点，跳过")
             rep.no_node += 1
             continue
 
@@ -3267,7 +3267,7 @@ def evaluate_ledger(ledger: dict, ruleset: dict, workday: WorkdayCalc,
         seen = "、".join(f"{k} {v} 行" for k, v in
                          sorted(rep.out_of_scope_detail.items(), key=lambda kv: -kv[1]))
         rep.warnings.append(
-            f"整张台账都被责任范围过滤掉了（{rep.total_rows} 行全部判为范围外）。"
+            f"🔴 整张台账都被责任范围过滤掉了（{rep.total_rows} 行全部判为范围外）。"
             f"实际观测到的取值：{seen or '(无)'}。"
             "请确认 scope_filters 的写法是否还匹配台账现状 —— "
             "台账里换个写法（比如「深圳分行」改成「深圳」）就会全表落空，"

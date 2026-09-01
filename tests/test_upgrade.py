@@ -783,6 +783,57 @@ class MigrationForceKilledDuringUpgradeTest(unittest.TestCase):
                 json.loads((self.state / name).read_text(encoding="utf-8")), data,
                 f"全部写完才被杀：{name} 必须保持新内容，回滚就是把成功的迁移退回去了")
 
+    def test_killed_after_log_cleanup_too_keeps_new_code_and_new_state(self):
+        """
+        🔴 外部审查复现的 P0：比上一条更晚一点被杀——连事务日志清理这一步
+        都成功了（finish_state_transaction() 跑完），只是在那之后（比如
+        进程即将正常退出、返回码还没交回父进程之前）被强杀。此时
+        pending_state_transaction() 和"从头到尾没碰过状态"看到的是同一
+        个 None，`--recover-only` 因此同样返回 0——但这次状态其实是
+        **完整写完的新内容**，不是真的没动过。仅凭退出码 0 分不出这两种，
+        必须多看一眼迁移完成标记有没有落盘（它是跟其余状态文件一起
+        原子写入的，标记在就说明真的写完过），标记在就不能回滚代码。
+
+        🔴 这条不能像上面几条那样用 `_seed_killed_at_step()` 提前把新状态
+        （含完成标记）铺到磁盘上再调用 `run_migration()`——`run_migration()`
+        一进来就会用同一个标记文件做"是不是已经迁移过"的早退检查，
+        提前铺好会让它在真正触发 `--apply`/`--recover-only` 这条链路
+        **之前**就直接早退返回，`fake_run` 根本不会被调用，测试等于
+        没测到任何东西（这也是上面
+        `test_killed_after_everything_written_keeps_new_code_and_new_state`
+        本身的构造缺陷，这里不顺带改它，只保证这条新加的测试测的是真的）。
+        做法：标记文件的"出现"必须发生在模拟的 `--apply` 调用**内部**——
+        真正代表"迁移子进程做完了工作、正要退出前被杀"这个时间点。
+        """
+        total = len(self.STATE_NAMES)
+        old, new = self._seed_killed_at_step(0)   # 现场：什么都还没写（含标记）
+        (self.state / core.STATE_TXN_FILE).unlink()  # 也没有事务日志
+
+        real_run = subprocess.run
+        calls = {"n": 0}
+
+        def fake_run(args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                self.assertIn("--apply", args)
+                # 模拟"真实工作全部做完、日志也清理完，只是在退出前被杀"：
+                # 把 5 个状态文件（含标记）直接写成迁移完成后的样子。
+                for name, data in new.items():
+                    (self.state / name).write_bytes(self._state_bytes(data))
+                return subprocess.CompletedProcess(args, -9)   # SIGKILL
+            self.assertIn("--recover-only", args)
+            return real_run(args, **kwargs)
+
+        with mock.patch.object(bootstrap.subprocess, "run", side_effect=fake_run):
+            bootstrap.run_migration(self.skill, self.runtime, hermes=True)  # 不该抛异常
+        self.assertEqual(calls["n"], 2, "必须真的走到 --apply 和 --recover-only 两次调用")
+
+        for name, data in new.items():
+            self.assertEqual(
+                json.loads((self.state / name).read_text(encoding="utf-8")), data,
+                f"日志清理都做完才被杀：{name} 必须保持新内容，"
+                f"回滚就是把成功的迁移退回去了")
+
 
 class InstallerItselfKilledBeforeMigrationEverRunsTest(unittest.TestCase):
     """

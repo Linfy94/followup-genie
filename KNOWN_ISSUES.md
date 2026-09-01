@@ -1,6 +1,6 @@
 # 已知问题
 
-本文件对应 `1.1.0`。Hermes 与 WorkBuddy 两条路径已经业务实际使用验证；
+本文件对应 `1.1.1`。Hermes 与 WorkBuddy 两条路径已经业务实际使用验证；
 下面列的是仍然存在、需要留意的边界（如 Windows 未验证），不代表全部风险已清零。
 
 ## 业务测试前必须知道
@@ -79,6 +79,23 @@
    所以无法像腾讯文档那样跑完比对一次 `last_modify_time`。
    与飞书同样，只能靠 `wecom_doc.ALLOWED_SUBCOMMANDS` 这道命令白名单兜底
    —— 白名单里只有 `sheet_get_info` 和 `get_doc_content` 两个只读命令。
+
+## 已在 `1.1.1` 修复
+
+**外部审查发现的 2 个 P0 + 1 个 P1，均已复现修复，详见 CHANGELOG.md：**
+
+- **迁移中断误判**：`bootstrap.py` 的 `--recover-only` 返回 0 时没检查
+  完成标记，会把"迁移已完整写完、只是清理阶段被强杀"误判成"从没碰过
+  状态"，错误回滚代码。现在会额外看 `migrations_completed.json` 有没有
+  落盘。
+- **WorkBuddy 上关键数据质量问题会彻底无人知晓**：1.1.0 把"整列失效"
+  这类会导致漏催的关键问题也一刀切搬去 telegram，而 telegram 依赖
+  hermes send，WorkBuddy 装机没有 hermes。现在按 🔴 前缀区分"关键"和
+  "温和"两级，telegram 发不出去时关键问题会退到企微发一条简短摘要
+  兜底；两个通道都没送达会让 `exit_code` 顶成 1。`FOLLOWUP_ALERT_TARGET`
+  在 README 里也不再写成单纯"可选"。
+- **数据质量通知拖慢企微业务推送**：telegram 重试最坏累计 97 秒，
+  原来排在企微推送之前会拖慢业务真正在等的清单。现在企微先发。
 
 ## 已在 `1.1.0` 改动
 
