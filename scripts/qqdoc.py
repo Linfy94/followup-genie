@@ -11,7 +11,7 @@
 特别注意 sheet.operation_sheet —— 它是表格内的 JS 沙箱，能改值改样式增删行列，
 **永远不要加进白名单**（实测当前 token 对它无权限，那是第二道保险，不是理由）。
 
-本模块封装了四个实测踩过的坑（详见方案「对抗式审查发现」）：
+本模块封装了五个实测踩过的坑（详见方案「对抗式审查发现」）：
   P0-1  行列索引是 0-based，end_row/end_col 是包含式。
         传 start_row=1 会静默吃掉表头行，返回整体错位一格的数据且不报错。
   P0-2  NUMBER 型单元格的 string_value 恒为空，值在 number_value 里。
@@ -19,10 +19,17 @@
   P0-3  日期在 cells 模式下是 serial number（基准 1899-12-30），
         CSV 模式下才是 "2026/3/31" 字符串。用 CSV 等于依赖单元格显示格式。
   P0-4  cells 模式不返回空单元格（键不存在 ≠ 空字符串）。
+  P0-5  2026-08-31 实测：加粗过的表头格，cells 模式下 value_type /
+        string_value 都读成空——数据行毫发无损，只有表头这一行的结构化
+        响应对这类格式失真（同一个单元格用 CSV 模式读完全正常）。
+        因此表头单独用 CSV 模式取，数据行继续用 cells 模式（本来就读得对，
+        也依赖 value_type 区分 NUMBER/STRING，不能整体换成 CSV——见 P0-3）。
 """
 
 from __future__ import annotations  # 兼容 Python 3.9（macOS 自带版本）
 
+import csv
+import io
 import json
 import re
 import sys
@@ -336,9 +343,39 @@ def read_sheet(file_id: str, sheet_id: str) -> Sheet:
             raise LedgerError(f"子表 {sheet_id} 读取到 0 个单元格，取数异常")
         start = end + 1
 
-    header_cells = rows.get(0, {})
-    header = [cell_text(header_cells.get(i)) for i in range(col_count)]
+    header = _read_header_row(file_id, sheet_id, col_count)
     return Sheet(header, rows)
+
+
+def _read_header_row(file_id: str, sheet_id: str, col_count: int) -> list[str]:
+    """
+    表头单独用 CSV 模式取，不用上面 cells 模式读到的第 0 行——见 P0-5：
+    加粗过的表头格在 cells 模式下 value_type/string_value 都读成空，
+    同一个格用 CSV 模式读完全正常。
+
+    🔴 不能用 `.splitlines()[:1]` 去取「第一行」——AI外贸拓客那张表头格
+       本身就带着换行（业务在表头格里写了使用说明，比如"企业\n
+       底色的含义：白色（新需求）→……"），CSV 规范里带换行的字段会被
+       引号包起来，物理行数比逻辑行数多。按物理行切会在字段中间断开，
+       后面所有列全部错位。必须用 `csv.reader` 在整段文本上解析，
+       取它给出的第一条**逻辑**记录，让引号内的换行被正确当成同一个字段。
+    """
+    data = call_tool(
+        "sheet.get_cell_data",
+        {
+            "file_id": file_id,
+            "sheet_id": sheet_id,
+            "start_row": 0,
+            "end_row": 0,
+            "start_col": 0,
+            "end_col": col_count - 1,
+            "return_csv": True,
+        },
+    )
+    csv_text = data.get("csv_data") or ""
+    fields = next(csv.reader(io.StringIO(csv_text)), [])
+    fields = fields[:col_count] + [""] * max(0, col_count - len(fields))
+    return [f.strip() for f in fields]
 
 
 def file_fingerprint(file_id: str) -> dict:
